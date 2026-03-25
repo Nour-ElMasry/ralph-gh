@@ -185,6 +185,19 @@ Lives at `<workspace>/.ralph-gh/state.json`:
 2. **Processed list** — completed parents are filtered out of polls
 3. **Label removal** — after a successful PR, the `ralph` label is removed. Even if state is lost, no double-processing.
 
+## Garbage in, garbage out
+
+ralph-gh is a wrapper around Claude Code. It is exactly as good as what you feed it.
+
+**Your results depend on:**
+
+- **Your issues** — vague issues get vague PRs. Write clear descriptions, acceptance criteria, and constraints. The more context you give, the less Claude has to guess.
+- **Your `.ralph/PROMPT.md`** — this is Claude's understanding of your project. Tech stack, conventions, architecture, guard rails. A good system prompt is the difference between "it rewrote my app in a different framework" and "it followed our patterns perfectly."
+- **Your codebase** — clean, well-structured code with clear patterns is easier for Claude to extend. If your code confuses humans, it will confuse Claude too.
+- **Your slice granularity** — smaller, well-scoped sub-issues succeed more often than massive ones. If a sub-issue says "build the entire auth system," expect a draft PR.
+
+ralph-gh won't turn bad issues into good code. It will turn good issues into good PRs — faster than you could type them yourself.
+
 ## Credits
 
 Inspired by [ralph-claude-code](https://github.com/frankbria/ralph-claude-code) by Frank Bria. Built with [Claude Code](https://docs.anthropic.com/en/docs/claude-code) by Anthropic.
