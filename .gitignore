@@ -1,0 +1,22 @@
+# Config (contains paths, may contain sensitive info)
+ralph-gh.conf
+
+# State files (runtime data)
+.ralph-gh/
+state.json
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Environment
+.env
+.env.*
