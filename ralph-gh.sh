@@ -225,36 +225,53 @@ complete_group() {
         return 1
     fi
 
-    # Build completed subs list for PR body
-    local completed_list=""
+    # Determine if this is a standalone issue (parent == only sub-issue)
     local completed_subs
     completed_subs=$(get_completed_subs)
-    while IFS= read -r sub; do
-        [[ -z "$sub" ]] && continue
-        local title
-        title=$(get_issue_title "$RALPH_GH_REPO" "$sub")
-        completed_list+="- #${sub} - ${title}"$'\n'
-    done <<< "$completed_subs"
+    local is_standalone=false
+    if [[ "$(echo "$completed_subs" | tr -d '[:space:]')" == "$parent_number" ]]; then
+        is_standalone=true
+    fi
 
     # Get parent title
     local parent_title
     parent_title=$(get_issue_title "$RALPH_GH_REPO" "$parent_number")
 
-    # Open PR
-    log_status "INFO" "Opening PR..."
-    open_pr "$RALPH_GH_REPO" "$branch_name" "$RALPH_GH_MAIN_BRANCH" \
-        "$parent_number" "$parent_title" "$completed_list"
+    if [[ "$is_standalone" == "true" ]]; then
+        # Standalone issue — PR closes the issue directly
+        log_status "INFO" "Opening PR for standalone issue #$parent_number..."
+        open_pr "$RALPH_GH_REPO" "$branch_name" "$RALPH_GH_MAIN_BRANCH" \
+            "$parent_number" "$parent_title" "Standalone issue — no sub-issues"
 
-    # Close sub-issues
-    while IFS= read -r sub; do
-        [[ -z "$sub" ]] && continue
-        log_status "INFO" "Closing sub-issue #$sub"
-        close_sub_issue "$RALPH_GH_REPO" "$sub" \
-            "Completed by ralph-gh as part of parent issue #$parent_number"
-    done <<< "$completed_subs"
+        # Close the issue
+        log_status "INFO" "Closing issue #$parent_number"
+        close_sub_issue "$RALPH_GH_REPO" "$parent_number" \
+            "Completed by ralph-gh. PR opened."
+    else
+        # Parent with sub-issues
+        local completed_list=""
+        while IFS= read -r sub; do
+            [[ -z "$sub" ]] && continue
+            local title
+            title=$(get_issue_title "$RALPH_GH_REPO" "$sub")
+            completed_list+="- #${sub} - ${title}"$'\n'
+        done <<< "$completed_subs"
 
-    # Remove label from parent
-    log_status "INFO" "Removing '$RALPH_GH_LABEL' label from parent #$parent_number"
+        log_status "INFO" "Opening PR..."
+        open_pr "$RALPH_GH_REPO" "$branch_name" "$RALPH_GH_MAIN_BRANCH" \
+            "$parent_number" "$parent_title" "$completed_list"
+
+        # Close sub-issues
+        while IFS= read -r sub; do
+            [[ -z "$sub" ]] && continue
+            log_status "INFO" "Closing sub-issue #$sub"
+            close_sub_issue "$RALPH_GH_REPO" "$sub" \
+                "Completed by ralph-gh as part of parent issue #$parent_number"
+        done <<< "$completed_subs"
+    fi
+
+    # Remove label from issue
+    log_status "INFO" "Removing '$RALPH_GH_LABEL' label from #$parent_number"
     remove_label "$RALPH_GH_REPO" "$parent_number" "$RALPH_GH_LABEL"
 
     # Update state
@@ -363,39 +380,39 @@ poll_and_process() {
         return 1
     fi
 
-    log_status "INFO" "Found parent issue #$parent_number"
+    log_status "INFO" "Found issue #$parent_number"
 
-    # Parse task list from parent body
+    # Parse task list from issue body
     local sub_issues
     sub_issues=$(parse_task_list "$parent_body")
 
-    if [[ -z "$sub_issues" ]]; then
-        log_status "WARN" "Parent #$parent_number has no unchecked sub-issues in task list"
-        update_last_poll
-        return 1
-    fi
-
-    log_status "INFO" "Found sub-issues: $(echo "$sub_issues" | tr '\n' ' ')"
-
-    # Validate sub-issues are open
-    local valid_subs
-    mapfile -t sub_array <<< "$sub_issues"
-    valid_subs=$(validate_sub_issues "$RALPH_GH_REPO" "${sub_array[@]}")
-
-    if [[ -z "$valid_subs" ]]; then
-        log_status "WARN" "No valid open sub-issues found for parent #$parent_number"
-        update_last_poll
-        return 1
-    fi
-
-    # Set up in_progress state
     local branch_name="ralph/issue-${parent_number}"
-    mapfile -t valid_sub_array <<< "$valid_subs"
-    set_in_progress "$parent_number" "$branch_name" "${valid_sub_array[@]}"
 
-    log_status "SUCCESS" "Set up work for parent #$parent_number with ${#valid_sub_array[@]} sub-issues"
+    if [[ -z "$sub_issues" ]]; then
+        # Standalone issue (no sub-issues) — treat the issue itself as the work
+        log_status "INFO" "Issue #$parent_number is a standalone issue (no task list)"
+        set_in_progress "$parent_number" "$branch_name" "$parent_number"
+        log_status "SUCCESS" "Set up work for standalone issue #$parent_number"
+    else
+        log_status "INFO" "Found sub-issues: $(echo "$sub_issues" | tr '\n' ' ')"
+
+        # Validate sub-issues are open
+        local valid_subs
+        mapfile -t sub_array <<< "$sub_issues"
+        valid_subs=$(validate_sub_issues "$RALPH_GH_REPO" "${sub_array[@]}")
+
+        if [[ -z "$valid_subs" ]]; then
+            log_status "WARN" "No valid open sub-issues found for parent #$parent_number"
+            update_last_poll
+            return 1
+        fi
+
+        mapfile -t valid_sub_array <<< "$valid_subs"
+        set_in_progress "$parent_number" "$branch_name" "${valid_sub_array[@]}"
+        log_status "SUCCESS" "Set up work for parent #$parent_number with ${#valid_sub_array[@]} sub-issues"
+    fi
+
     update_last_poll
-
     return 0
 }
 

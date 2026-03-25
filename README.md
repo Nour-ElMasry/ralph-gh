@@ -76,7 +76,9 @@ Config resolution: built-in defaults -> `~/.ralph-gh/ralph-gh.conf` -> `.ralphrc
 
 ## Issue format
 
-Parent issues must use GitHub task list syntax:
+### Parent issue with sub-issues
+
+Use GitHub task list syntax to link sub-issues:
 
 ```markdown
 ## Description
@@ -89,6 +91,17 @@ Implement user authentication flow
 ```
 
 Each `- [ ] #N` references a sub-issue that ralph-gh will work on sequentially.
+
+### Standalone issues
+
+Issues without a task list are treated as standalone tasks — ralph-gh works the issue directly, opens a PR, and closes it:
+
+```markdown
+## Description
+Fix the login button not responding on mobile
+```
+
+Just label it `ralph` and it will be picked up.
 
 ## Commands
 
