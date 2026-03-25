@@ -29,6 +29,8 @@ CLAUDE_TIMEOUT_MINUTES="${CLAUDE_TIMEOUT_MINUTES:-15}"
 RALPH_GH_ALLOWED_TOOLS="${RALPH_GH_ALLOWED_TOOLS:-Write,Read,Edit,Bash(git add *),Bash(git commit *),Bash(git diff *),Bash(git log *),Bash(git status),Bash(git status *),Bash(git push *),Bash(git pull *),Bash(git fetch *),Bash(git checkout *),Bash(git branch *),Bash(git stash *),Bash(git merge *),Bash(git tag *),Bash(npm *),Bash(pnpm *),Bash(node *),Bash(find *)}"
 CB_NO_PROGRESS_THRESHOLD="${CB_NO_PROGRESS_THRESHOLD:-3}"
 CB_SAME_ERROR_THRESHOLD="${CB_SAME_ERROR_THRESHOLD:-5}"
+RALPH_GH_MAX_LOOPS_PER_ISSUE="${RALPH_GH_MAX_LOOPS_PER_ISSUE:-5}"  # Max Claude invocations per sub-issue
+RALPH_GH_MAX_LOOPS_TOTAL="${RALPH_GH_MAX_LOOPS_TOTAL:-0}"          # Max total invocations per parent group (0=unlimited)
 
 # =============================================================================
 # CONFIG LOADING (3-layer: defaults -> global -> project)
@@ -124,6 +126,9 @@ process_parent_group() {
     branch_name=$(get_in_progress_branch)
 
     log_status "INFO" "Processing parent issue #$parent_number on branch $branch_name"
+    log_status "INFO" "Loops per sub-issue: $RALPH_GH_MAX_LOOPS_PER_ISSUE | Total limit: ${RALPH_GH_MAX_LOOPS_TOTAL:-unlimited}"
+
+    local total_loops=0
 
     # Reset circuit breaker for this group
     reset_circuit_breaker
@@ -154,57 +159,78 @@ process_parent_group() {
 
         log_status "LOOP" "=== Sub-issue #$sub_number ==="
 
-        # Check circuit breaker
-        if ! can_execute; then
-            log_status "ERROR" "Circuit breaker is open, aborting group"
-            abort_group "$parent_number" "$branch_name" "Circuit breaker opened: $(show_circuit_status)"
-            return 1
-        fi
+        # Loop per sub-issue: re-invoke Claude until it reports COMPLETE or hits the limit
+        local loop_count=0
+        local sub_done=false
 
-        # Get session ID for continuity across sub-issues
-        local session_id
-        session_id=$(get_saved_session_id)
+        while [[ "$sub_done" == "false" ]]; do
+            loop_count=$((loop_count + 1))
+            total_loops=$((total_loops + 1))
 
-        # Execute Claude for this sub-issue
-        local result=0
-        execute_for_sub_issue \
-            "$RALPH_GH_WORKSPACE" \
-            "$RALPH_GH_REPO" \
-            "$sub_number" \
-            "$parent_number" \
-            "$session_id" \
-            "$RALPH_GH_ALLOWED_TOOLS" \
-            "$CLAUDE_TIMEOUT_MINUTES" || result=$?
-
-        if [[ $result -eq 0 ]]; then
-            # Success - commit changes and update state
-            local sub_title
-            sub_title=$(get_issue_title "$RALPH_GH_REPO" "$sub_number")
-            commit_changes "$sub_number" "$sub_title"
-            mark_sub_complete "$sub_number"
-
-            # Record progress in circuit breaker
-            record_result "true" "false"
-
-            log_status "SUCCESS" "Sub-issue #$sub_number completed and committed"
-        else
-            # Failure - record in circuit breaker
-            record_result "false" "true"
-
-            if ! can_execute; then
-                log_status "ERROR" "Circuit breaker tripped after sub-issue #$sub_number"
+            # Check max loops per sub-issue
+            if [[ $loop_count -gt $RALPH_GH_MAX_LOOPS_PER_ISSUE ]]; then
+                log_status "ERROR" "Sub-issue #$sub_number hit max loops ($RALPH_GH_MAX_LOOPS_PER_ISSUE), stopping group"
                 abort_group "$parent_number" "$branch_name" \
-                    "Circuit breaker opened while working on sub-issue #$sub_number"
-                return 1
-            else
-                # Circuit breaker still allows execution, but this sub-issue failed
-                # Per design: STOP the entire group on any failure
-                log_status "ERROR" "Sub-issue #$sub_number failed, stopping group"
-                abort_group "$parent_number" "$branch_name" \
-                    "Sub-issue #$sub_number failed. Claude could not complete the task."
+                    "Sub-issue #$sub_number exceeded max loops ($RALPH_GH_MAX_LOOPS_PER_ISSUE). Claude could not complete in time."
                 return 1
             fi
-        fi
+
+            # Check max total loops for the group
+            if [[ $RALPH_GH_MAX_LOOPS_TOTAL -gt 0 && $total_loops -gt $RALPH_GH_MAX_LOOPS_TOTAL ]]; then
+                log_status "ERROR" "Parent #$parent_number hit max total loops ($RALPH_GH_MAX_LOOPS_TOTAL), stopping group"
+                abort_group "$parent_number" "$branch_name" \
+                    "Parent group exceeded max total loops ($RALPH_GH_MAX_LOOPS_TOTAL)."
+                return 1
+            fi
+
+            # Check circuit breaker
+            if ! can_execute; then
+                log_status "ERROR" "Circuit breaker is open, aborting group"
+                abort_group "$parent_number" "$branch_name" "Circuit breaker opened: $(show_circuit_status)"
+                return 1
+            fi
+
+            log_status "INFO" "Sub-issue #$sub_number — loop $loop_count/$RALPH_GH_MAX_LOOPS_PER_ISSUE (total: $total_loops)"
+
+            # Get session ID for continuity across loops and sub-issues
+            local session_id
+            session_id=$(get_saved_session_id)
+
+            # Execute Claude for this sub-issue
+            local result=0
+            execute_for_sub_issue \
+                "$RALPH_GH_WORKSPACE" \
+                "$RALPH_GH_REPO" \
+                "$sub_number" \
+                "$parent_number" \
+                "$session_id" \
+                "$RALPH_GH_ALLOWED_TOOLS" \
+                "$CLAUDE_TIMEOUT_MINUTES" || result=$?
+
+            if [[ $result -eq 0 ]]; then
+                # Success — commit changes and mark done
+                local sub_title
+                sub_title=$(get_issue_title "$RALPH_GH_REPO" "$sub_number")
+                commit_changes "$sub_number" "$sub_title"
+                mark_sub_complete "$sub_number"
+                record_result "true" "false"
+                log_status "SUCCESS" "Sub-issue #$sub_number completed in $loop_count loop(s)"
+                sub_done=true
+            else
+                # Failure — record and check circuit breaker
+                record_result "false" "true"
+
+                if ! can_execute; then
+                    log_status "ERROR" "Circuit breaker tripped on sub-issue #$sub_number (loop $loop_count)"
+                    abort_group "$parent_number" "$branch_name" \
+                        "Circuit breaker opened while working on sub-issue #$sub_number (loop $loop_count)"
+                    return 1
+                fi
+
+                # Still within limits — will retry on next iteration of while loop
+                log_status "WARN" "Sub-issue #$sub_number loop $loop_count failed, retrying..."
+            fi
+        done
     done <<< "$remaining_subs"
 
     # All sub-issues completed successfully

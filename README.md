@@ -113,6 +113,8 @@ That's it. Label an issue `ralph` and watch it go.
 | `RALPH_GH_POLL_INTERVAL` | `1800` | How often to check (seconds) |
 | `RALPH_GH_MAIN_BRANCH` | `main` | Base branch for PRs |
 | `CLAUDE_TIMEOUT_MINUTES` | `15` | Max time Claude gets per sub-issue |
+| `RALPH_GH_MAX_LOOPS_PER_ISSUE` | `5` | Max Claude invocations per sub-issue |
+| `RALPH_GH_MAX_LOOPS_TOTAL` | `0` | Max total invocations per parent group (0 = unlimited) |
 | `CB_NO_PROGRESS_THRESHOLD` | `3` | Circuit breaker trips after N stuck attempts |
 
 ### Per-project (in your repo root)
