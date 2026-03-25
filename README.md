@@ -1,134 +1,168 @@
-# ralph-gh
+<p align="center">
+  <h1 align="center">ralph-gh</h1>
+  <p align="center"><strong>Your tireless AI intern that closes GitHub issues while you sleep.</strong></p>
+</p>
 
-Autonomous GitHub issue worker powered by Claude Code CLI.
+<p align="center">
+  <a href="#quick-start">Quick Start</a> &bull;
+  <a href="#how-it-works">How It Works</a> &bull;
+  <a href="#configuration">Configuration</a> &bull;
+  <a href="#safety">Safety</a>
+</p>
 
-ralph-gh polls your GitHub repo for labeled parent issues, parses their task lists for sub-issues, works through them sequentially using Claude Code, and opens a PR when done.
+---
+
+ralph-gh is a background daemon that watches your GitHub issues. When you label one `ralph`, it wakes up, reads the issue, spins up [Claude Code](https://docs.anthropic.com/en/docs/claude-code), writes the code, and opens a PR. Then it goes back to sleep and waits for the next one.
+
+It handles **standalone issues** (single tasks) and **parent issues with sub-task checklists** (sequential multi-step work on a single branch).
 
 ## How it works
 
 ```
-1. You create a parent issue with a task list:
-   - [ ] #12 Add user validation
-   - [ ] #13 Update API endpoint
-   - [ ] #14 Write tests
-
-2. You label it "ralph"
-
-3. ralph-gh picks it up, creates a branch, and works each sub-issue
-
-4. When done: PR opened, sub-issues closed, label removed
-   On failure: Draft PR with partial work, comment explaining what went wrong
+                    You                                     ralph-gh
+                     |                                          |
+                     |  Create issue, label it "ralph"          |
+                     |----------------------------------------->|
+                     |                                          |
+                     |                          Polls every 30m |
+                     |                          Finds the issue |
+                     |                          Creates branch  |
+                     |                          Runs Claude Code|
+                     |                          Commits changes |
+                     |                          Pushes + opens PR|
+                     |                                          |
+                     |  PR ready for review                     |
+                     |<-----------------------------------------|
+                     |                                          |
+                     |  (You review, merge, ship)               |
+                     |                                          |
 ```
 
-## Prerequisites
+### Two modes
 
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) (authenticated via Max subscription)
-- [GitHub CLI](https://cli.github.com/) (`gh`, authenticated)
-- `git`, `jq`
+**Standalone issue** — label any issue, ralph-gh works it directly:
+
+```markdown
+## Fix login button not responding on mobile
+
+The submit button on /login doesn't fire the onClick handler on iOS Safari.
+Probably a z-index or touch event issue.
+```
+
+**Parent issue with sub-tasks** — use GitHub's task list syntax to break it down:
+
+```markdown
+## Implement user auth flow
+
+- [ ] #12 Add input validation to signup form
+- [ ] #13 Create /api/auth/register endpoint
+- [ ] #14 Write integration tests
+```
+
+ralph-gh works each `- [ ] #N` sequentially on a single branch. One PR for the whole group.
 
 ## Quick start
 
 ```bash
-# Clone
 git clone https://github.com/Nour-ElMasry/ralph-gh.git
 cd ralph-gh
-
-# Install
 ./install.sh
+```
 
-# Configure
+Then configure it:
+
+```bash
 $EDITOR ~/.ralph-gh/ralph-gh.conf
-# Set RALPH_GH_REPO and RALPH_GH_WORKSPACE
+```
 
-# Create the label on your repo
-./setup.sh owner/repo
+```bash
+# The two things you must set:
+RALPH_GH_REPO="you/your-repo"
+RALPH_GH_WORKSPACE="/path/to/local/clone"
+```
 
-# Run
-~/.ralph-gh/ralph-gh.sh
+Create the label and start it up:
 
-# Or run in tmux (recommended)
+```bash
+./setup.sh you/your-repo
+
+# Run in tmux so it survives terminal closes
 tmux new -s ralph-gh '~/.ralph-gh/ralph-gh.sh'
 ```
 
+That's it. Label an issue `ralph` and watch it go.
+
+## Prerequisites
+
+| Tool | Why |
+|---|---|
+| [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) | The brain. Must be authenticated (Max subscription, OAuth). |
+| [GitHub CLI](https://cli.github.com/) (`gh`) | Reads issues, opens PRs, manages labels. Must be authenticated. |
+| `git` | You know why. |
+| `jq` | JSON parsing for state management and API responses. |
+
 ## Configuration
 
-### Global config (`~/.ralph-gh/ralph-gh.conf`)
+### Global (`~/.ralph-gh/ralph-gh.conf`)
 
-| Variable | Default | Description |
+| Variable | Default | What it does |
 |---|---|---|
-| `RALPH_GH_REPO` | (required) | GitHub repo, e.g. `owner/repo` |
-| `RALPH_GH_WORKSPACE` | (required) | Local path to repo clone |
-| `RALPH_GH_LABEL` | `ralph` | Issue label that triggers automation |
-| `RALPH_GH_POLL_INTERVAL` | `1800` | Seconds between polls (30 min) |
+| `RALPH_GH_REPO` | *(required)* | Target repo (`owner/repo`) |
+| `RALPH_GH_WORKSPACE` | *(required)* | Path to your local clone |
+| `RALPH_GH_LABEL` | `ralph` | The magic label |
+| `RALPH_GH_POLL_INTERVAL` | `1800` | How often to check (seconds) |
 | `RALPH_GH_MAIN_BRANCH` | `main` | Base branch for PRs |
-| `CLAUDE_TIMEOUT_MINUTES` | `15` | Max time per sub-issue |
-| `CB_NO_PROGRESS_THRESHOLD` | `3` | Circuit breaker: open after N no-progress attempts |
+| `CLAUDE_TIMEOUT_MINUTES` | `15` | Max time Claude gets per sub-issue |
+| `CB_NO_PROGRESS_THRESHOLD` | `3` | Circuit breaker trips after N stuck attempts |
 
-### Per-project config
+### Per-project (in your repo root)
 
-ralph-gh checks the workspace root for:
+ralph-gh respects the same config files as [ralph-claude-code](https://github.com/frankbria/ralph-claude-code):
 
-- **`.ralphrc`** - Project settings that override global config (same format)
-- **`.ralph/PROMPT.md`** - Project-specific system prompt for Claude (tech stack, conventions, architecture)
-- **`.ralph/AGENT.md`** - Build/test/run instructions (appended to prompt)
+| File | Purpose |
+|---|---|
+| `.ralphrc` | Project-specific settings (overrides global config) |
+| `.ralph/PROMPT.md` | System prompt for Claude — your tech stack, conventions, architecture |
+| `.ralph/AGENT.md` | Build/test/run instructions (appended to the prompt) |
 
-Config resolution: built-in defaults -> `~/.ralph-gh/ralph-gh.conf` -> `.ralphrc`
+**Config priority:** built-in defaults < `~/.ralph-gh/ralph-gh.conf` < `.ralphrc`
 
-## Issue format
-
-### Parent issue with sub-issues
-
-Use GitHub task list syntax to link sub-issues:
-
-```markdown
-## Description
-Implement user authentication flow
-
-## Tasks
-- [ ] #12 Add user validation
-- [ ] #13 Update API endpoint
-- [ ] #14 Write tests
-```
-
-Each `- [ ] #N` references a sub-issue that ralph-gh will work on sequentially.
-
-### Standalone issues
-
-Issues without a task list are treated as standalone tasks — ralph-gh works the issue directly, opens a PR, and closes it:
-
-```markdown
-## Description
-Fix the login button not responding on mobile
-```
-
-Just label it `ralph` and it will be picked up.
-
-## Commands
+## CLI
 
 ```bash
-ralph-gh.sh              # Start the poll loop
-ralph-gh.sh --status     # Show current state
-ralph-gh.sh --reset      # Reset state and circuit breaker
-ralph-gh.sh --help       # Show help
+ralph-gh.sh              # Start the loop
+ralph-gh.sh --status     # What's it doing right now?
+ralph-gh.sh --reset      # Clear state + circuit breaker
+ralph-gh.sh --help       # You're reading the better version of this
 ```
+
+## Safety
+
+ralph-gh is designed to be **conservative, not clever**.
+
+- **Label-gated** — only touches issues you explicitly label. No surprises.
+- **No auto-merge** — always opens a PR for human review. You decide what ships.
+- **Circuit breaker** — if Claude gets stuck (no progress after N attempts), it stops, opens a draft PR with whatever it has, and comments on the issue explaining what went wrong.
+- **Resumable** — kill the process mid-work, restart it, and it picks up where it left off from `state.json`.
+- **Failure is loud** — on abort: draft PR + GitHub comment with the failure reason. The label stays so you can re-trigger after fixing the issue.
 
 ## Architecture
 
 ```
-ralph-gh.sh (orchestrator)
+ralph-gh.sh                          The main loop: poll, dispatch, sleep, repeat
   |
-  +-- lib/github_poller.sh    # Poll issues, parse task lists
-  +-- lib/issue_worker.sh     # Claude Code invocation per sub-issue
-  +-- lib/branch_manager.sh   # Git operations, PR creation
-  +-- lib/state_manager.sh    # JSON state persistence
-  +-- lib/circuit_breaker.sh  # Stagnation detection
-  +-- lib/utils.sh            # Logging utilities
-  +-- lib/date_utils.sh       # Cross-platform date helpers
+  +-- lib/github_poller.sh           Talks to GitHub: find issues, parse task lists
+  +-- lib/issue_worker.sh            Builds prompts, invokes Claude Code CLI
+  +-- lib/branch_manager.sh          Git branch/commit/push/PR operations
+  +-- lib/state_manager.sh           JSON state: what's in progress, what's done
+  +-- lib/circuit_breaker.sh         Detects when Claude is spinning its wheels
+  +-- lib/utils.sh                   Logging, cross-platform timeout
+  +-- lib/date_utils.sh              Date helpers that work on both Linux and macOS
 ```
 
-### State management
+### State
 
-State is stored in `<workspace>/.ralph-gh/state.json`:
+Lives at `<workspace>/.ralph-gh/state.json`:
 
 ```json
 {
@@ -143,22 +177,15 @@ State is stored in `<workspace>/.ralph-gh/state.json`:
 }
 ```
 
-### Double-processing prevention
+### How it avoids doing the same work twice
 
-1. `state.in_progress` acts as a lock during work
-2. `state.processed` filters out completed parents
-3. Label removal after PR - survives state loss
-
-## Safety
-
-- **Circuit breaker**: Stops after repeated failures (configurable threshold)
-- **On failure**: Opens a draft PR with partial work, comments on parent issue
-- **No auto-merge**: PRs are opened for human review
-- **Label-based**: Only issues you explicitly label get worked on
+1. **State lock** — `in_progress` prevents re-picking an active issue
+2. **Processed list** — completed parents are filtered out of polls
+3. **Label removal** — after a successful PR, the `ralph` label is removed. Even if state is lost, no double-processing.
 
 ## Credits
 
-Inspired by [ralph-claude-code](https://github.com/frankbria/ralph-claude-code) by Frank Bria.
+Inspired by [ralph-claude-code](https://github.com/frankbria/ralph-claude-code) by Frank Bria. Built with [Claude Code](https://docs.anthropic.com/en/docs/claude-code) by Anthropic.
 
 ## License
 
