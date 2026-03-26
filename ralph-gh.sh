@@ -5,7 +5,7 @@ set -euo pipefail
 # Polls GitHub for labeled parent issues, works through sub-issues sequentially,
 # and opens PRs when done.
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
 # Source library modules
 source "$SCRIPT_DIR/lib/date_utils.sh"
