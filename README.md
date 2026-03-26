@@ -92,6 +92,14 @@ tmux new -s ralph-gh '~/.ralph-gh/ralph-gh.sh'
 
 That's it. Label an issue `ralph` and watch it go.
 
+### Uninstalling
+
+```bash
+./uninstall.sh
+```
+
+This removes `~/.ralph-gh/` and the `ralph-gh` symlink. Per-project files (`.ralph/`, `.ralph-gh/`, `.ralphrc`) in your repos are left untouched.
+
 ## Prerequisites
 
 | Tool | Why |
@@ -132,10 +140,13 @@ ralph-gh respects the same config files as [ralph-claude-code](https://github.co
 ## CLI
 
 ```bash
-ralph-gh.sh              # Start the loop
-ralph-gh.sh --status     # What's it doing right now?
-ralph-gh.sh --reset      # Clear state + circuit breaker
-ralph-gh.sh --help       # You're reading the better version of this
+ralph-gh              # Start the loop
+ralph-gh --status     # What's it doing right now?
+ralph-gh --pause      # Pause after current sub-issue completes
+ralph-gh --resume     # Resume a paused instance
+ralph-gh --kill       # Kill running instance and all child processes
+ralph-gh --reset      # Clear state + circuit breaker
+ralph-gh --help       # Show help
 ```
 
 ## Safety
