@@ -217,6 +217,7 @@ process_parent_group() {
                 sub_title=$(get_issue_title "$RALPH_GH_REPO" "$sub_number" < /dev/null)
                 commit_changes "$sub_number" "$sub_title"
                 mark_sub_complete "$sub_number"
+                check_off_sub_issue "$RALPH_GH_REPO" "$parent_number" "$sub_number"
                 record_result "true" "false"
                 log_status "SUCCESS" "Sub-issue #$sub_number completed in $loop_count loop(s)"
                 sub_done=true

@@ -77,6 +77,37 @@ close_sub_issue() {
         --comment "$comment" < /dev/null 2>/dev/null
 }
 
+# Check off a sub-issue in the parent issue's task list (- [ ] #N → - [x] #N)
+check_off_sub_issue() {
+    local repo=$1
+    local parent_number=$2
+    local sub_number=$3
+
+    local body
+    body=$(get_issue_body "$repo" "$parent_number")
+    if [[ -z "$body" ]]; then
+        log_status "WARN" "Could not fetch body for parent #$parent_number, skipping checkbox update"
+        return 0
+    fi
+
+    # Replace unchecked checkbox for this specific sub-issue number
+    local new_body
+    new_body=$(printf '%s\n' "$body" | sed "s/- \[ \] #${sub_number}\b/- [x] #${sub_number}/g")
+
+    if [[ "$new_body" == "$body" ]]; then
+        log_status "INFO" "Checkbox for #$sub_number already checked or not found in parent #$parent_number"
+        return 0
+    fi
+
+    if ! gh issue edit "$parent_number" --repo "$repo" --body "$new_body" < /dev/null 2>/dev/null; then
+        log_status "WARN" "Failed to update checkbox for #$sub_number in parent #$parent_number"
+    else
+        log_status "INFO" "Checked off #$sub_number in parent #$parent_number"
+    fi
+
+    return 0
+}
+
 # Remove a label from an issue
 remove_label() {
     local repo=$1
@@ -148,5 +179,5 @@ validate_sub_issues() {
 
 export -f poll_for_parent_issues parse_task_list parse_completed_tasks
 export -f fetch_sub_issue_details get_issue_title get_issue_body
-export -f close_sub_issue remove_label comment_on_issue
+export -f close_sub_issue check_off_sub_issue remove_label comment_on_issue
 export -f check_github_available validate_sub_issues
