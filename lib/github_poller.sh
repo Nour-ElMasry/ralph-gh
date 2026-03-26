@@ -14,7 +14,7 @@ poll_for_parent_issues() {
         --state open \
         --limit 50 \
         --json number,title,body,createdAt \
-        --jq 'sort_by(.createdAt)' 2>/dev/null
+        --jq 'sort_by(.createdAt)' < /dev/null 2>/dev/null
 }
 
 # Parse task list from issue body
@@ -41,7 +41,7 @@ fetch_sub_issue_details() {
 
     gh issue view "$issue_number" \
         --repo "$repo" \
-        --json number,title,body,labels,comments 2>/dev/null
+        --json number,title,body,labels,comments < /dev/null 2>/dev/null
 }
 
 # Get just the title of an issue
@@ -52,7 +52,7 @@ get_issue_title() {
     gh issue view "$issue_number" \
         --repo "$repo" \
         --json title \
-        --jq '.title' 2>/dev/null
+        --jq '.title' < /dev/null 2>/dev/null
 }
 
 # Get just the body of an issue
@@ -63,7 +63,7 @@ get_issue_body() {
     gh issue view "$issue_number" \
         --repo "$repo" \
         --json body \
-        --jq '.body' 2>/dev/null
+        --jq '.body' < /dev/null 2>/dev/null
 }
 
 # Close a sub-issue with a comment
@@ -74,7 +74,7 @@ close_sub_issue() {
 
     gh issue close "$issue_number" \
         --repo "$repo" \
-        --comment "$comment" 2>/dev/null
+        --comment "$comment" < /dev/null 2>/dev/null
 }
 
 # Remove a label from an issue
@@ -85,7 +85,7 @@ remove_label() {
 
     gh issue edit "$issue_number" \
         --repo "$repo" \
-        --remove-label "$label" 2>/dev/null
+        --remove-label "$label" < /dev/null 2>/dev/null
 }
 
 # Add a comment to an issue
@@ -96,7 +96,7 @@ comment_on_issue() {
 
     gh issue comment "$issue_number" \
         --repo "$repo" \
-        --body "$body" 2>/dev/null
+        --body "$body" < /dev/null 2>/dev/null
 }
 
 # Check if gh CLI is available and authenticated
@@ -106,7 +106,7 @@ check_github_available() {
         return 1
     fi
 
-    if ! gh auth status &>/dev/null; then
+    if ! gh auth status < /dev/null &>/dev/null; then
         log_status "ERROR" "gh CLI not authenticated. Run: gh auth login"
         return 1
     fi
@@ -127,7 +127,7 @@ validate_sub_issues() {
 
     for sub in "${sub_issues[@]}"; do
         local state
-        state=$(gh issue view "$sub" --repo "$repo" --json state --jq '.state' 2>/dev/null)
+        state=$(gh issue view "$sub" --repo "$repo" --json state --jq '.state' < /dev/null 2>/dev/null)
         if [[ -z "$state" ]]; then
             log_status "WARN" "Sub-issue #$sub does not exist yet, deferring parent"
             all_valid=false

@@ -36,11 +36,12 @@ log_status() {
 }
 
 # Cross-platform timeout wrapper
+# Sends TERM first, then KILL after 10s to ensure full cleanup
 portable_timeout() {
     if command -v timeout &>/dev/null; then
-        timeout "$@"
+        timeout --kill-after=10s "$@"
     elif command -v gtimeout &>/dev/null; then
-        gtimeout "$@"
+        gtimeout --kill-after=10s "$@"
     else
         # Fallback: run without timeout
         shift  # Remove the timeout duration arg

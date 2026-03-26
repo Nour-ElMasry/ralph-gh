@@ -51,7 +51,7 @@ commit_changes() {
         fi
     fi
 
-    git add -A 2>/dev/null
+    git add -A -- ':!.ralph-gh' 2>/dev/null
     git commit -m "feat(ralph): #${sub_issue_number} - ${sub_issue_title}" 2>/dev/null
     return $?
 }

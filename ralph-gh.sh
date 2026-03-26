@@ -146,19 +146,22 @@ process_parent_group() {
     fi
 
     # Process each remaining sub-issue sequentially
-    local remaining_subs
-    remaining_subs=$(get_remaining_subs)
+    # Re-read from state each iteration (resilient to external state changes)
+    while true; do
+        local sub_number
+        sub_number=$(get_remaining_subs | head -1)
 
-    if [[ -z "$remaining_subs" ]]; then
-        log_status "WARN" "No remaining sub-issues for parent #$parent_number"
-        complete_group "$parent_number" "$branch_name"
-        return 0
-    fi
+        if [[ -z "$sub_number" ]]; then
+            break
+        fi
 
-    while IFS= read -r sub_number; do
-        [[ -z "$sub_number" ]] && continue
+        # Check pause state before each sub-issue
+        wait_if_paused
 
         log_status "LOOP" "=== Sub-issue #$sub_number ==="
+
+        # Clear session from previous sub-issue (prevent context bleed)
+        clear_saved_session
 
         # Loop per sub-issue: re-invoke Claude until it reports COMPLETE or hits the limit
         local loop_count=0
@@ -193,7 +196,7 @@ process_parent_group() {
 
             log_status "INFO" "Sub-issue #$sub_number — loop $loop_count/$RALPH_GH_MAX_LOOPS_PER_ISSUE (total: $total_loops)"
 
-            # Get session ID for continuity across loops and sub-issues
+            # Get session ID for continuity within retries of the SAME sub-issue
             local session_id
             session_id=$(get_saved_session_id)
 
@@ -211,7 +214,7 @@ process_parent_group() {
             if [[ $result -eq 0 ]]; then
                 # Success — commit changes and mark done
                 local sub_title
-                sub_title=$(get_issue_title "$RALPH_GH_REPO" "$sub_number")
+                sub_title=$(get_issue_title "$RALPH_GH_REPO" "$sub_number" < /dev/null)
                 commit_changes "$sub_number" "$sub_title"
                 mark_sub_complete "$sub_number"
                 record_result "true" "false"
@@ -232,7 +235,7 @@ process_parent_group() {
                 log_status "WARN" "Sub-issue #$sub_number loop $loop_count failed, retrying..."
             fi
         done
-    done <<< "$remaining_subs"
+    done
 
     # All sub-issues completed successfully
     complete_group "$parent_number" "$branch_name"
@@ -365,6 +368,24 @@ $completed_list"
 }
 
 # =============================================================================
+# PAUSE / RESUME
+# =============================================================================
+
+# Check if paused and block until resumed
+wait_if_paused() {
+    local pause_file="$RALPH_GH_STATE_DIR/.paused"
+    if [[ ! -f "$pause_file" ]]; then
+        return 0
+    fi
+
+    log_status "INFO" "Paused — waiting for resume (remove $pause_file or run ralph-gh --resume)..."
+    while [[ -f "$pause_file" ]]; do
+        sleep 5
+    done
+    log_status "INFO" "Resumed — continuing work"
+}
+
+# =============================================================================
 # POLL LOOP
 # =============================================================================
 
@@ -462,6 +483,15 @@ main() {
     init_state
     init_circuit_breaker
 
+    # Acquire exclusive lock (prevents concurrent instances)
+    local lock_file="$RALPH_GH_STATE_DIR/.lock"
+    mkdir -p "$RALPH_GH_STATE_DIR"
+    exec 9>"$lock_file"
+    if ! flock -n 9; then
+        log_status "ERROR" "Another ralph-gh instance is already running (lock: $lock_file)"
+        exit 1
+    fi
+
     log_status "INFO" "Workspace: $RALPH_GH_WORKSPACE"
     log_status "INFO" "Repo: $RALPH_GH_REPO"
     log_status "INFO" "Label: $RALPH_GH_LABEL"
@@ -473,11 +503,14 @@ main() {
         local resume_parent
         resume_parent=$(get_in_progress_parent)
         log_status "INFO" "Resuming in-progress work on parent #$resume_parent"
+        wait_if_paused
         process_parent_group
     fi
 
     # Main poll loop
     while true; do
+        wait_if_paused
+
         # Try to find and set up new work
         if ! has_in_progress; then
             if poll_and_process; then
@@ -506,6 +539,13 @@ case "${1:-}" in
         cd "$RALPH_GH_WORKSPACE"
         init_state
         echo "=== ralph-gh Status ==="
+        if [[ -f "$RALPH_GH_STATE_DIR/.paused" ]]; then
+            echo "State: PAUSED"
+        elif flock -n "$RALPH_GH_STATE_DIR/.lock" true 2>/dev/null; then
+            echo "State: STOPPED"
+        else
+            echo "State: RUNNING"
+        fi
         if has_in_progress; then
             echo "In progress: parent #$(get_in_progress_parent) on $(get_in_progress_branch)"
             echo "Completed subs: $(get_completed_subs | tr '\n' ' ')"
@@ -524,6 +564,24 @@ case "${1:-}" in
         reset_circuit_breaker
         echo "State and circuit breaker reset"
         ;;
+    --pause)
+        load_config
+        cd "$RALPH_GH_WORKSPACE"
+        mkdir -p "$RALPH_GH_STATE_DIR"
+        touch "$RALPH_GH_STATE_DIR/.paused"
+        echo "ralph-gh paused. Current sub-issue will finish before pausing."
+        echo "Run 'ralph-gh --resume' to continue."
+        ;;
+    --resume)
+        load_config
+        cd "$RALPH_GH_WORKSPACE"
+        if [[ -f "$RALPH_GH_STATE_DIR/.paused" ]]; then
+            rm -f "$RALPH_GH_STATE_DIR/.paused"
+            echo "ralph-gh resumed."
+        else
+            echo "ralph-gh is not paused."
+        fi
+        ;;
     --help|-h)
         echo "ralph-gh - Autonomous GitHub Issue Worker"
         echo ""
@@ -532,6 +590,8 @@ case "${1:-}" in
         echo "Options:"
         echo "  --status    Show current status"
         echo "  --reset     Reset state and circuit breaker"
+        echo "  --pause     Pause after current sub-issue completes"
+        echo "  --resume    Resume a paused instance"
         echo "  --help      Show this help"
         echo ""
         echo "Configuration:"
