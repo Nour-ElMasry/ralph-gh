@@ -97,12 +97,18 @@ Automated by [ralph-gh](https://github.com/Nour-ElMasry/ralph-gh)
 EOF
 )
 
-    gh pr create \
+    local pr_url
+    if pr_url=$(gh pr create \
         --repo "$repo" \
         --base "$main_branch" \
         --head "$branch_name" \
         --title "$pr_title" \
-        --body "$pr_body" 2>/dev/null
+        --body "$pr_body" 2>&1); then
+        log_status "SUCCESS" "PR created: $pr_url"
+    else
+        log_status "ERROR" "gh pr create failed: $pr_url"
+        return 1
+    fi
 }
 
 # Open a draft PR for partial/failed work
@@ -139,13 +145,19 @@ Automated by [ralph-gh](https://github.com/Nour-ElMasry/ralph-gh)
 EOF
 )
 
-    gh pr create \
+    local pr_url
+    if pr_url=$(gh pr create \
         --repo "$repo" \
         --base "$main_branch" \
         --head "$branch_name" \
         --title "$pr_title" \
         --body "$pr_body" \
-        --draft 2>/dev/null
+        --draft 2>&1); then
+        log_status "SUCCESS" "Draft PR created: $pr_url"
+    else
+        log_status "ERROR" "gh pr create (draft) failed: $pr_url"
+        return 1
+    fi
 }
 
 export -f ensure_latest_main create_branch commit_changes push_branch

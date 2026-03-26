@@ -289,34 +289,38 @@ complete_group() {
     if [[ "$is_standalone" == "true" ]]; then
         # Standalone issue — PR closes the issue directly
         log_status "INFO" "Opening PR for standalone issue #$parent_number..."
-        open_pr "$RALPH_GH_REPO" "$branch_name" "$RALPH_GH_MAIN_BRANCH" \
-            "$parent_number" "$parent_title" "Standalone issue — no sub-issues"
+        if ! open_pr "$RALPH_GH_REPO" "$branch_name" "$RALPH_GH_MAIN_BRANCH" \
+            "$parent_number" "$parent_title" "Standalone issue — no sub-issues"; then
+            log_status "WARN" "Failed to open PR for standalone issue #$parent_number"
+        fi
 
         # Close the issue
         log_status "INFO" "Closing issue #$parent_number"
         close_sub_issue "$RALPH_GH_REPO" "$parent_number" \
-            "Completed by ralph-gh. PR opened."
+            "Completed by ralph-gh. PR opened." || true
     else
         # Parent with sub-issues
         local completed_list
-        completed_list=$(build_completed_subs_list)
+        completed_list=$(build_completed_subs_list) || completed_list="(could not build list)"
 
         log_status "INFO" "Opening PR..."
-        open_pr "$RALPH_GH_REPO" "$branch_name" "$RALPH_GH_MAIN_BRANCH" \
-            "$parent_number" "$parent_title" "$completed_list"
+        if ! open_pr "$RALPH_GH_REPO" "$branch_name" "$RALPH_GH_MAIN_BRANCH" \
+            "$parent_number" "$parent_title" "$completed_list"; then
+            log_status "WARN" "Failed to open PR for parent #$parent_number"
+        fi
 
         # Close sub-issues
         while IFS= read -r sub; do
             [[ -z "$sub" ]] && continue
             log_status "INFO" "Closing sub-issue #$sub"
             close_sub_issue "$RALPH_GH_REPO" "$sub" \
-                "Completed by ralph-gh as part of parent issue #$parent_number"
+                "Completed by ralph-gh as part of parent issue #$parent_number" || true
         done <<< "$completed_subs"
     fi
 
     # Remove label from issue
     log_status "INFO" "Removing '$RALPH_GH_LABEL' label from #$parent_number"
-    remove_label "$RALPH_GH_REPO" "$parent_number" "$RALPH_GH_LABEL"
+    remove_label "$RALPH_GH_REPO" "$parent_number" "$RALPH_GH_LABEL" || true
 
     # Update state
     mark_parent_processed "$parent_number"
@@ -341,7 +345,7 @@ abort_group() {
 
     # Build completed subs list
     local completed_list
-    completed_list=$(build_completed_subs_list)
+    completed_list=$(build_completed_subs_list) || completed_list="(could not build list)"
 
     # Get parent title
     local parent_title
@@ -351,7 +355,7 @@ abort_group() {
     # Open draft PR
     log_status "INFO" "Opening draft PR with partial work..."
     open_draft_pr "$RALPH_GH_REPO" "$branch_name" "$RALPH_GH_MAIN_BRANCH" \
-        "$parent_number" "$parent_title" "$completed_list" "$failure_reason"
+        "$parent_number" "$parent_title" "$completed_list" "$failure_reason" || true
 
     # Comment on parent issue
     comment_on_issue "$RALPH_GH_REPO" "$parent_number" \
@@ -362,7 +366,7 @@ abort_group() {
 A draft PR has been opened with the partial work completed so far. The \`$RALPH_GH_LABEL\` label has been kept so you can re-trigger after fixing the issue.
 
 **Completed sub-issues:**
-$completed_list"
+$completed_list" || true
 
     # Clear in_progress and mark as processed for THIS run (skips re-pick in same run).
     # Label is kept so the next `ralph-gh run` can re-trigger it.
