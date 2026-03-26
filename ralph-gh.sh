@@ -214,7 +214,8 @@ process_parent_group() {
             if [[ $result -eq 0 ]]; then
                 # Success — commit changes and mark done
                 local sub_title
-                sub_title=$(get_issue_title "$RALPH_GH_REPO" "$sub_number" < /dev/null)
+                sub_title=$(get_issue_title "$RALPH_GH_REPO" "$sub_number" < /dev/null) || sub_title=""
+                [[ -z "$sub_title" ]] && sub_title="Sub-issue $sub_number"
                 commit_changes "$sub_number" "$sub_title"
                 mark_sub_complete "$sub_number"
                 check_off_sub_issue "$RALPH_GH_REPO" "$parent_number" "$sub_number"
@@ -251,7 +252,8 @@ build_completed_subs_list() {
     while IFS= read -r sub; do
         [[ -z "$sub" ]] && continue
         local title
-        title=$(get_issue_title "$RALPH_GH_REPO" "$sub")
+        title=$(get_issue_title "$RALPH_GH_REPO" "$sub") || title=""
+        [[ -z "$title" ]] && title="Sub-issue $sub"
         list+="- #${sub} - ${title}"$'\n'
     done <<< "$completed_subs"
     echo "${list:-None}"
@@ -280,7 +282,8 @@ complete_group() {
 
     # Get parent title
     local parent_title
-    parent_title=$(get_issue_title "$RALPH_GH_REPO" "$parent_number")
+    parent_title=$(get_issue_title "$RALPH_GH_REPO" "$parent_number") || parent_title=""
+    [[ -z "$parent_title" ]] && parent_title="Issue $parent_number"
 
     if [[ "$is_standalone" == "true" ]]; then
         # Standalone issue — PR closes the issue directly
@@ -341,7 +344,8 @@ abort_group() {
 
     # Get parent title
     local parent_title
-    parent_title=$(get_issue_title "$RALPH_GH_REPO" "$parent_number")
+    parent_title=$(get_issue_title "$RALPH_GH_REPO" "$parent_number") || parent_title=""
+    [[ -z "$parent_title" ]] && parent_title="Issue $parent_number"
 
     # Open draft PR
     log_status "INFO" "Opening draft PR with partial work..."

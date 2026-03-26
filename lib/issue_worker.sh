@@ -79,8 +79,8 @@ execute_for_sub_issue() {
 
     # Fetch sub-issue details
     local sub_title sub_body
-    sub_title=$(get_issue_title "$repo" "$sub_issue_number")
-    sub_body=$(get_issue_body "$repo" "$sub_issue_number")
+    sub_title=$(get_issue_title "$repo" "$sub_issue_number") || sub_title=""
+    sub_body=$(get_issue_body "$repo" "$sub_issue_number") || sub_body=""
 
     if [[ -z "$sub_title" ]]; then
         log_status "ERROR" "Could not fetch details for sub-issue #$sub_issue_number"
@@ -89,7 +89,8 @@ execute_for_sub_issue() {
 
     # Fetch parent title
     local parent_title
-    parent_title=$(get_issue_title "$repo" "$parent_issue_number")
+    parent_title=$(get_issue_title "$repo" "$parent_issue_number") || parent_title=""
+    [[ -z "$parent_title" ]] && parent_title="Issue $parent_issue_number"
 
     # Get completed subs for context
     local completed_subs_list
