@@ -56,9 +56,10 @@ load_config() {
         [[ -n "${PROJECT_NAME:-}" ]] && log_status "INFO" "Project: $PROJECT_NAME"
     fi
 
-    # Set derived paths
+    # Set derived paths and ensure directories exist
     export RALPH_GH_STATE_DIR="$RALPH_GH_WORKSPACE/.ralph-gh"
     export LOG_DIR="$RALPH_GH_STATE_DIR/logs"
+    mkdir -p "$LOG_DIR"
 
     # Update circuit breaker and state manager paths
     CB_STATE_FILE="$RALPH_GH_STATE_DIR/.circuit_breaker_state"
@@ -461,7 +462,6 @@ main() {
 
     # Initialize state
     cd "$RALPH_GH_WORKSPACE"
-    mkdir -p "$RALPH_GH_STATE_DIR/logs"
     init_state
     init_circuit_breaker
 

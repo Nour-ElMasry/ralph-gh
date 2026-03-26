@@ -22,6 +22,7 @@ init_circuit_breaker() {
     fi
 
     if [[ ! -f "$CB_STATE_FILE" ]]; then
+        mkdir -p "$(dirname "$CB_STATE_FILE")"
         cat > "$CB_STATE_FILE" << EOF
 {
     "state": "$CB_STATE_CLOSED",
@@ -156,6 +157,7 @@ EOF
 
 # Reset circuit breaker (for new parent issue groups)
 reset_circuit_breaker() {
+    mkdir -p "$(dirname "$CB_STATE_FILE")"
     cat > "$CB_STATE_FILE" << EOF
 {
     "state": "$CB_STATE_CLOSED",

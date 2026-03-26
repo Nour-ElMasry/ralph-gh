@@ -41,6 +41,7 @@ load_state() {
 # Atomic write to state file
 save_state() {
     local new_state=$1
+    mkdir -p "$(dirname "$STATE_FILE")"
     local tmp_file="${STATE_FILE}.tmp"
     echo "$new_state" > "$tmp_file"
     mv "$tmp_file" "$STATE_FILE"

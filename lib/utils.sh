@@ -30,6 +30,7 @@ log_status() {
 
     # Write to log file if LOG_DIR is set
     if [[ -n "${LOG_DIR:-}" ]]; then
+        mkdir -p "$LOG_DIR" 2>/dev/null
         echo "[$timestamp] [$level] $message" >> "$LOG_DIR/ralph-gh.log" 2>/dev/null
     fi
 }

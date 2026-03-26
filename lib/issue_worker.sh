@@ -196,6 +196,7 @@ execute_for_sub_issue() {
         fi
 
         if [[ -n "$new_session_id" && "$new_session_id" != "null" ]]; then
+            mkdir -p "$RALPH_GH_STATE_DIR"
             echo "$new_session_id" > "$RALPH_GH_STATE_DIR/.claude_session_id"
             log_status "INFO" "Saved session: ${new_session_id:0:20}..."
         fi
