@@ -216,10 +216,11 @@ process_parent_group() {
                 local sub_title
                 sub_title=$(get_issue_title "$RALPH_GH_REPO" "$sub_number" < /dev/null) || sub_title=""
                 [[ -z "$sub_title" ]] && sub_title="Sub-issue $sub_number"
-                commit_changes "$sub_number" "$sub_title"
+                commit_changes "$sub_number" "$sub_title" || \
+                    log_status "WARN" "commit_changes failed for #$sub_number, continuing"
                 mark_sub_complete "$sub_number"
-                check_off_sub_issue "$RALPH_GH_REPO" "$parent_number" "$sub_number"
-                record_result "true" "false"
+                check_off_sub_issue "$RALPH_GH_REPO" "$parent_number" "$sub_number" || true
+                record_result "true" "false" || true
                 log_status "SUCCESS" "Sub-issue #$sub_number completed in $loop_count loop(s)"
                 sub_done=true
             else

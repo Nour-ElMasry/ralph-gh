@@ -51,9 +51,12 @@ commit_changes() {
         fi
     fi
 
-    git add -A -- ':!.ralph-gh' 2>/dev/null
-    git commit -m "feat(ralph): #${sub_issue_number} - ${sub_issue_title}" 2>/dev/null
-    return $?
+    git add -A -- ':!.ralph-gh' 2>/dev/null || true
+    if ! git commit -m "feat(ralph): #${sub_issue_number} - ${sub_issue_title}" 2>/dev/null; then
+        log_status "WARN" "git commit failed for #$sub_issue_number (changes may already be committed)"
+        return 1
+    fi
+    return 0
 }
 
 # Push branch to remote

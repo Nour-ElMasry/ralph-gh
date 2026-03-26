@@ -74,7 +74,7 @@ check_off_sub_issue() {
     local sub_number=$3
 
     local body
-    body=$(get_issue_body "$repo" "$parent_number")
+    body=$(get_issue_body "$repo" "$parent_number") || body=""
     if [[ -z "$body" ]]; then
         log_status "WARN" "Could not fetch body for parent #$parent_number, skipping checkbox update"
         return 0

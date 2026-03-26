@@ -67,9 +67,13 @@ record_result() {
     init_circuit_breaker
 
     local state_data
-    state_data=$(cat "$CB_STATE_FILE")
+    state_data=$(cat "$CB_STATE_FILE" 2>/dev/null) || state_data=""
+    if [[ -z "$state_data" ]]; then
+        _write_cb_default_state
+        state_data=$(cat "$CB_STATE_FILE" 2>/dev/null) || return 0
+    fi
     local current_state
-    current_state=$(echo "$state_data" | jq -r '.state')
+    current_state=$(echo "$state_data" | jq -r '.state' 2>/dev/null) || current_state="$CB_STATE_CLOSED"
     local consecutive_no_progress
     consecutive_no_progress=$(echo "$state_data" | jq -r '.consecutive_no_progress' | tr -d '[:space:]')
     local consecutive_same_error

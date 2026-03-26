@@ -87,13 +87,14 @@ mark_sub_complete() {
     local sub_number=$1
 
     local state
-    state=$(load_state)
-    state=$(echo "$state" | jq \
+    state=$(load_state) || { log_status "ERROR" "Failed to load state for mark_sub_complete"; return 1; }
+    local new_state
+    new_state=$(echo "$state" | jq \
         --argjson sub "$sub_number" \
         '.in_progress.completed_subs += [$sub] |
-         .in_progress.remaining_subs -= [$sub]')
+         .in_progress.remaining_subs -= [$sub]') || { log_status "ERROR" "jq failed in mark_sub_complete"; return 1; }
 
-    save_state "$state"
+    save_state "$new_state"
 }
 
 # Get remaining sub-issues
