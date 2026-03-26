@@ -588,28 +588,26 @@ case "${1:-}" in
     --kill)
         load_config
         cd "$RALPH_GH_WORKSPACE"
-        local lock_file="$RALPH_GH_STATE_DIR/.lock"
-        if [[ -f "$lock_file" ]]; then
-            local pid
-            pid=$(flock -n "$lock_file" echo "not-locked" 2>/dev/null)
-            if [[ "$pid" != "not-locked" ]]; then
+        _lock_file="$RALPH_GH_STATE_DIR/.lock"
+        if [[ -f "$_lock_file" ]]; then
+            _pid=$(flock -n "$_lock_file" echo "not-locked" 2>/dev/null)
+            if [[ "$_pid" != "not-locked" ]]; then
                 # Find the ralph-gh process holding the lock
-                local holder_pid
-                holder_pid=$(fuser "$lock_file" 2>/dev/null | tr -d '[:space:]')
-                if [[ -n "$holder_pid" ]]; then
-                    echo "Killing ralph-gh process tree (PID: $holder_pid)..."
+                _holder_pid=$(fuser "$_lock_file" 2>/dev/null | tr -d '[:space:]')
+                if [[ -n "$_holder_pid" ]]; then
+                    echo "Killing ralph-gh process tree (PID: $_holder_pid)..."
                     # Kill the entire process group to catch Claude subprocesses
-                    kill -- -"$(ps -o pgid= -p "$holder_pid" | tr -d '[:space:]')" 2>/dev/null || \
-                        kill "$holder_pid" 2>/dev/null
+                    kill -- -"$(ps -o pgid= -p "$_holder_pid" | tr -d '[:space:]')" 2>/dev/null || \
+                        kill "$_holder_pid" 2>/dev/null
                     sleep 1
                     # Force kill if still alive
-                    if kill -0 "$holder_pid" 2>/dev/null; then
-                        kill -9 "$holder_pid" 2>/dev/null
+                    if kill -0 "$_holder_pid" 2>/dev/null; then
+                        kill -9 "$_holder_pid" 2>/dev/null
                     fi
                     echo "ralph-gh killed."
                 else
                     echo "Could not find ralph-gh process. Lock may be stale."
-                    rm -f "$lock_file"
+                    rm -f "$_lock_file"
                     echo "Removed stale lock."
                 fi
             else
