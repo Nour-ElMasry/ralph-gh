@@ -492,6 +492,9 @@ main() {
         exit 1
     fi
 
+    # Trap Ctrl+C / SIGTERM — kill entire process group for clean shutdown
+    trap 'log_status "WARN" "Caught signal, shutting down..."; kill 0 2>/dev/null; exit 130' INT TERM
+
     log_status "INFO" "Workspace: $RALPH_GH_WORKSPACE"
     log_status "INFO" "Repo: $RALPH_GH_REPO"
     log_status "INFO" "Label: $RALPH_GH_LABEL"
@@ -582,6 +585,41 @@ case "${1:-}" in
             echo "ralph-gh is not paused."
         fi
         ;;
+    --kill)
+        load_config
+        cd "$RALPH_GH_WORKSPACE"
+        local lock_file="$RALPH_GH_STATE_DIR/.lock"
+        if [[ -f "$lock_file" ]]; then
+            local pid
+            pid=$(flock -n "$lock_file" echo "not-locked" 2>/dev/null)
+            if [[ "$pid" != "not-locked" ]]; then
+                # Find the ralph-gh process holding the lock
+                local holder_pid
+                holder_pid=$(fuser "$lock_file" 2>/dev/null | tr -d '[:space:]')
+                if [[ -n "$holder_pid" ]]; then
+                    echo "Killing ralph-gh process tree (PID: $holder_pid)..."
+                    # Kill the entire process group to catch Claude subprocesses
+                    kill -- -"$(ps -o pgid= -p "$holder_pid" | tr -d '[:space:]')" 2>/dev/null || \
+                        kill "$holder_pid" 2>/dev/null
+                    sleep 1
+                    # Force kill if still alive
+                    if kill -0 "$holder_pid" 2>/dev/null; then
+                        kill -9 "$holder_pid" 2>/dev/null
+                    fi
+                    echo "ralph-gh killed."
+                else
+                    echo "Could not find ralph-gh process. Lock may be stale."
+                    rm -f "$lock_file"
+                    echo "Removed stale lock."
+                fi
+            else
+                echo "ralph-gh is not running."
+            fi
+        else
+            echo "ralph-gh is not running (no lock file)."
+        fi
+        rm -f "$RALPH_GH_STATE_DIR/.paused"
+        ;;
     --help|-h)
         echo "ralph-gh - Autonomous GitHub Issue Worker"
         echo ""
@@ -592,6 +630,7 @@ case "${1:-}" in
         echo "  --reset     Reset state and circuit breaker"
         echo "  --pause     Pause after current sub-issue completes"
         echo "  --resume    Resume a paused instance"
+        echo "  --kill      Kill running instance and all child processes"
         echo "  --help      Show this help"
         echo ""
         echo "Configuration:"
