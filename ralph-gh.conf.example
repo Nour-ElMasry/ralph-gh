@@ -7,7 +7,6 @@ RALPH_GH_WORKSPACE=""                     # Local path to repo clone
 
 # Optional (defaults shown)
 RALPH_GH_LABEL="ralph"                    # Label that triggers automation
-RALPH_GH_POLL_INTERVAL=1800               # Seconds between polls (30 min)
 RALPH_GH_MAIN_BRANCH="main"              # Base branch for PRs
 CLAUDE_TIMEOUT_MINUTES=15                 # Max time per sub-issue
 

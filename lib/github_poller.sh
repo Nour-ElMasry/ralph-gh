@@ -34,16 +34,6 @@ parse_completed_tasks() {
     echo "$body" | grep -oE '\- \[[xX]\] #[0-9]+' | grep -oE '#[0-9]+' | sed 's/#//'
 }
 
-# Fetch detailed information about a sub-issue
-fetch_sub_issue_details() {
-    local repo=$1
-    local issue_number=$2
-
-    gh issue view "$issue_number" \
-        --repo "$repo" \
-        --json number,title,body,labels,comments < /dev/null 2>/dev/null
-}
-
 # Get just the title of an issue
 get_issue_title() {
     local repo=$1
@@ -178,6 +168,6 @@ validate_sub_issues() {
 }
 
 export -f poll_for_parent_issues parse_task_list parse_completed_tasks
-export -f fetch_sub_issue_details get_issue_title get_issue_body
+export -f get_issue_title get_issue_body
 export -f close_sub_issue check_off_sub_issue remove_label comment_on_issue
 export -f check_github_available validate_sub_issues

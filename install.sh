@@ -65,12 +65,10 @@ echo ""
 # Create install directory
 echo "Installing to $INSTALL_DIR..."
 mkdir -p "$INSTALL_DIR/lib"
-mkdir -p "$INSTALL_DIR/templates"
 
 # Copy scripts
 cp "$SCRIPT_DIR/ralph-gh.sh" "$INSTALL_DIR/"
 cp "$SCRIPT_DIR/lib/"*.sh "$INSTALL_DIR/lib/"
-cp "$SCRIPT_DIR/templates/"*.md "$INSTALL_DIR/templates/"
 
 # Make executable
 chmod +x "$INSTALL_DIR/ralph-gh.sh"

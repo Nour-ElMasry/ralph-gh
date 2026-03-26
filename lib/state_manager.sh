@@ -6,30 +6,30 @@
 STATE_DIR="${RALPH_GH_STATE_DIR:-.ralph-gh}"
 STATE_FILE="$STATE_DIR/state.json"
 
+# Write a fresh default state file
+_write_default_state() {
+    mkdir -p "$STATE_DIR"
+    cat > "$STATE_FILE" << 'EOF'
+{
+    "in_progress": null,
+    "processed": [],
+    "last_poll": null
+}
+EOF
+}
+
 # Initialize state directory and file
 init_state() {
     mkdir -p "$STATE_DIR"
 
     if [[ ! -f "$STATE_FILE" ]]; then
-        cat > "$STATE_FILE" << 'EOF'
-{
-    "in_progress": null,
-    "processed": [],
-    "last_poll": null
-}
-EOF
+        _write_default_state
     fi
 
     # Validate existing state file
     if ! jq '.' "$STATE_FILE" > /dev/null 2>&1; then
         log_status "WARN" "Corrupted state file, reinitializing"
-        cat > "$STATE_FILE" << 'EOF'
-{
-    "in_progress": null,
-    "processed": [],
-    "last_poll": null
-}
-EOF
+        _write_default_state
     fi
 }
 
@@ -45,11 +45,6 @@ save_state() {
     local tmp_file="${STATE_FILE}.tmp"
     echo "$new_state" > "$tmp_file"
     mv "$tmp_file" "$STATE_FILE"
-}
-
-# Check if there's work in progress
-get_in_progress() {
-    jq -r '.in_progress // empty' "$STATE_FILE" 2>/dev/null
 }
 
 # Check if in_progress is set (non-null)
@@ -148,6 +143,14 @@ is_processed() {
     jq -e --argjson n "$parent_number" '.processed | index($n) != null' "$STATE_FILE" > /dev/null 2>&1
 }
 
+# Clear the processed list (for fresh runs)
+clear_processed() {
+    local state
+    state=$(load_state)
+    state=$(echo "$state" | jq '.processed = []')
+    save_state "$state"
+}
+
 # Update last poll timestamp
 update_last_poll() {
     local state
@@ -157,8 +160,8 @@ update_last_poll() {
 }
 
 export -f init_state load_state save_state
-export -f get_in_progress has_in_progress set_in_progress
+export -f has_in_progress set_in_progress
 export -f mark_sub_complete get_remaining_subs get_completed_subs
 export -f get_in_progress_parent get_in_progress_branch
-export -f mark_parent_processed clear_in_progress is_processed
+export -f mark_parent_processed clear_in_progress is_processed clear_processed
 export -f update_last_poll

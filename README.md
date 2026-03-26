@@ -12,7 +12,7 @@
 
 ---
 
-ralph-gh is a background daemon that watches your GitHub issues. When you label one `ralph`, it wakes up, reads the issue, spins up [Claude Code](https://docs.anthropic.com/en/docs/claude-code), writes the code, and opens a PR. Then it goes back to sleep and waits for the next one.
+ralph-gh is a CLI tool that processes your GitHub issues. Label issues `ralph`, run `ralph-gh run`, and it picks them up, spins up [Claude Code](https://docs.anthropic.com/en/docs/claude-code), writes the code, and opens a PR for each one.
 
 It handles **standalone issues** (single tasks) and **parent issues with sub-task checklists** (sequential multi-step work on a single branch).
 
@@ -22,15 +22,16 @@ It handles **standalone issues** (single tasks) and **parent issues with sub-tas
                     You                                     ralph-gh
                      |                                          |
                      |  Create issue, label it "ralph"          |
+                     |                                          |
+                     |  Run: ralph-gh run                       |
                      |----------------------------------------->|
                      |                                          |
-                     |                          Polls every 30m |
-                     |                          Finds the issue |
+                     |                        Finds all labeled |
                      |                          Creates branch  |
                      |                          Runs Claude Code|
                      |                          Commits changes |
                      |                          Checks off subs |
-                     |                          Pushes + opens PR|
+                     |                        Pushes + opens PR |
                      |                                          |
                      |  PR ready for review                     |
                      |<-----------------------------------------|
@@ -82,16 +83,16 @@ RALPH_GH_REPO="you/your-repo"
 RALPH_GH_WORKSPACE="/path/to/local/clone"
 ```
 
-Create the label and start it up:
+Create the label and run:
 
 ```bash
 ./setup.sh you/your-repo
 
-# Run in tmux so it survives terminal closes
-tmux new -s ralph-gh '~/.ralph-gh/ralph-gh.sh'
+# Process all labeled issues
+ralph-gh run
 ```
 
-That's it. Label an issue `ralph` and watch it go.
+That's it. Label an issue `ralph`, run `ralph-gh run`, and watch it go.
 
 ### Uninstalling
 
@@ -119,7 +120,6 @@ This removes `~/.ralph-gh/` and the `ralph-gh` symlink. Per-project files (`.ral
 | `RALPH_GH_REPO` | *(required)* | Target repo (`owner/repo`) |
 | `RALPH_GH_WORKSPACE` | *(required)* | Path to your local clone |
 | `RALPH_GH_LABEL` | `ralph` | The magic label |
-| `RALPH_GH_POLL_INTERVAL` | `1800` | How often to check (seconds) |
 | `RALPH_GH_MAIN_BRANCH` | `main` | Base branch for PRs |
 | `CLAUDE_TIMEOUT_MINUTES` | `15` | Max time Claude gets per sub-issue |
 | `RALPH_GH_MAX_LOOPS_PER_ISSUE` | `5` | Max Claude invocations per sub-issue |
@@ -141,13 +141,12 @@ ralph-gh respects the same config files as [ralph-claude-code](https://github.co
 ## CLI
 
 ```bash
-ralph-gh              # Start the loop
-ralph-gh --status     # What's it doing right now?
-ralph-gh --pause      # Pause after current sub-issue completes
-ralph-gh --resume     # Resume a paused instance
-ralph-gh --kill       # Kill running instance and all child processes
-ralph-gh --reset      # Clear state + circuit breaker
-ralph-gh --help       # Show help
+ralph-gh run              # Process all labeled issues and exit
+ralph-gh run --label foo  # Override label for this run
+ralph-gh --status         # What's it doing right now?
+ralph-gh --kill           # Kill running instance and all child processes
+ralph-gh --reset          # Clear state + circuit breaker
+ralph-gh --help           # Show help
 ```
 
 ## Safety
@@ -157,14 +156,14 @@ ralph-gh is designed to be **conservative, not clever**.
 - **Label-gated** — only touches issues you explicitly label. No surprises.
 - **No auto-merge** — always opens a PR for human review. You decide what ships.
 - **Circuit breaker** — if Claude gets stuck (no progress after N attempts), it stops, opens a draft PR with whatever it has, and comments on the issue explaining what went wrong.
-- **Resumable** — kill the process mid-work, restart it, and it picks up where it left off from `state.json`.
+- **Resumable** — if interrupted mid-work, the next `ralph-gh run` picks up where it left off from `state.json`.
 - **Progress tracking** — sub-issue checkboxes are checked off in the parent issue as each one completes. Sub-issues are closed after the PR is opened.
-- **Failure is loud** — on abort: draft PR + GitHub comment with the failure reason. The label stays so you can re-trigger after fixing the issue.
+- **Failure is loud** — on abort: draft PR + GitHub comment with the failure reason. The label stays so the next `ralph-gh run` can re-trigger after you fix the issue.
 
 ## Architecture
 
 ```
-ralph-gh.sh                          The main loop: poll, dispatch, sleep, repeat
+ralph-gh.sh                          Entry point: find labeled issues, process all, exit
   |
   +-- lib/github_poller.sh           Talks to GitHub: find issues, parse task lists
   +-- lib/issue_worker.sh            Builds prompts, invokes Claude Code CLI
@@ -194,9 +193,9 @@ Lives at `<workspace>/.ralph-gh/state.json`:
 
 ### How it avoids doing the same work twice
 
-1. **State lock** — `in_progress` prevents re-picking an active issue
-2. **Processed list** — completed parents are filtered out of polls
-3. **Label removal** — after a successful PR, the `ralph` label is removed. Even if state is lost, no double-processing.
+1. **Label removal** — after a successful PR, the `ralph` label is removed. This is the primary dedup mechanism.
+2. **State lock** — `in_progress` prevents re-picking an active issue
+3. **Per-run processed list** — issues attempted in the current run (whether completed or aborted) are skipped for the remainder of that run. Cleared on next `ralph-gh run`.
 
 ## Garbage in, garbage out
 

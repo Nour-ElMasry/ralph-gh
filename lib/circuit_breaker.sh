@@ -15,6 +15,22 @@ CB_SAME_ERROR_THRESHOLD=${CB_SAME_ERROR_THRESHOLD:-5}
 # State file location (set by orchestrator)
 CB_STATE_FILE="${RALPH_GH_STATE_DIR:-.ralph-gh}/.circuit_breaker_state"
 
+# Write a fresh circuit breaker state file
+_write_cb_default_state() {
+    local reason="${1:-}"
+    mkdir -p "$(dirname "$CB_STATE_FILE")"
+    cat > "$CB_STATE_FILE" << EOF
+{
+    "state": "$CB_STATE_CLOSED",
+    "last_change": "$(get_iso_timestamp)",
+    "consecutive_no_progress": 0,
+    "consecutive_same_error": 0,
+    "total_opens": 0,
+    "reason": "$reason"
+}
+EOF
+}
+
 # Initialize circuit breaker
 init_circuit_breaker() {
     if [[ -f "$CB_STATE_FILE" ]] && ! jq '.' "$CB_STATE_FILE" > /dev/null 2>&1; then
@@ -22,17 +38,7 @@ init_circuit_breaker() {
     fi
 
     if [[ ! -f "$CB_STATE_FILE" ]]; then
-        mkdir -p "$(dirname "$CB_STATE_FILE")"
-        cat > "$CB_STATE_FILE" << EOF
-{
-    "state": "$CB_STATE_CLOSED",
-    "last_change": "$(get_iso_timestamp)",
-    "consecutive_no_progress": 0,
-    "consecutive_same_error": 0,
-    "total_opens": 0,
-    "reason": ""
-}
-EOF
+        _write_cb_default_state
     fi
 }
 
@@ -157,17 +163,7 @@ EOF
 
 # Reset circuit breaker (for new parent issue groups)
 reset_circuit_breaker() {
-    mkdir -p "$(dirname "$CB_STATE_FILE")"
-    cat > "$CB_STATE_FILE" << EOF
-{
-    "state": "$CB_STATE_CLOSED",
-    "last_change": "$(get_iso_timestamp)",
-    "consecutive_no_progress": 0,
-    "consecutive_same_error": 0,
-    "total_opens": 0,
-    "reason": "Reset for new issue group"
-}
-EOF
+    _write_cb_default_state "Reset for new issue group"
     log_status "INFO" "Circuit breaker reset"
 }
 

@@ -12,18 +12,15 @@ echo "  ralph-gh Uninstaller"
 echo "================================================"
 echo ""
 
-# Check if there's a running instance
-if [[ -f "$INSTALL_DIR/.lock" ]]; then
-    pid=$(cat "$INSTALL_DIR/.lock" 2>/dev/null || true)
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-        echo "[WARN] ralph-gh is currently running (PID $pid)."
-        echo "       Run 'ralph-gh --kill' first, or pass --force to this script."
-        if [[ "${1:-}" != "--force" ]]; then
-            exit 1
-        fi
-        echo "       --force specified, continuing anyway..."
-        echo ""
+# Check if there's a running instance (ralph-gh uses flock, not PID-in-file)
+if [[ -f "$INSTALL_DIR/.lock" ]] && ! flock -n "$INSTALL_DIR/.lock" true 2>/dev/null; then
+    echo "[WARN] ralph-gh is currently running."
+    echo "       Run 'ralph-gh --kill' first, or pass --force to this script."
+    if [[ "${1:-}" != "--force" ]]; then
+        exit 1
     fi
+    echo "       --force specified, continuing anyway..."
+    echo ""
 fi
 
 removed=0

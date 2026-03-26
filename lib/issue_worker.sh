@@ -2,34 +2,6 @@
 
 # issue_worker.sh - Per-sub-issue Claude Code invocation for ralph-gh
 
-# Build the prompt for a sub-issue by combining template + issue context
-build_issue_prompt() {
-    local template_file=$1
-    local sub_issue_number=$2
-    local sub_issue_title=$3
-    local sub_issue_body=$4
-    local parent_issue_number=$5
-    local parent_issue_title=$6
-    local completed_subs=$7
-
-    local prompt
-    prompt=$(cat "$template_file")
-
-    # Replace placeholders
-    prompt=$(echo "$prompt" | sed \
-        -e "s|{{SUB_ISSUE_NUMBER}}|${sub_issue_number}|g" \
-        -e "s|{{SUB_ISSUE_TITLE}}|${sub_issue_title}|g" \
-        -e "s|{{PARENT_ISSUE_NUMBER}}|${parent_issue_number}|g" \
-        -e "s|{{PARENT_ISSUE_TITLE}}|${parent_issue_title}|g" \
-        -e "s|{{COMPLETED_SUBS}}|${completed_subs}|g")
-
-    # Replace multi-line body separately (sed can't handle multi-line easily)
-    # Use awk for the body replacement
-    prompt=$(echo "$prompt" | awk -v body="$sub_issue_body" '{gsub(/\{\{SUB_ISSUE_BODY\}\}/, body); print}')
-
-    echo "$prompt"
-}
-
 # Build the full prompt, combining project prompt + issue context
 build_full_prompt() {
     local workspace=$1
@@ -258,5 +230,5 @@ clear_saved_session() {
     rm -f "$RALPH_GH_STATE_DIR/.claude_session_id"
 }
 
-export -f build_issue_prompt build_full_prompt execute_for_sub_issue
+export -f build_full_prompt execute_for_sub_issue
 export -f get_saved_session_id clear_saved_session

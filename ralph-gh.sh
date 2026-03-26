@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ralph-gh - Autonomous GitHub Issue Worker
-# Polls GitHub for labeled parent issues, works through sub-issues sequentially,
+# Fetches GitHub issues by label, works through sub-issues sequentially,
 # and opens PRs when done.
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
@@ -23,7 +23,6 @@ source "$SCRIPT_DIR/lib/issue_worker.sh"
 RALPH_GH_REPO="${RALPH_GH_REPO:-}"
 RALPH_GH_WORKSPACE="${RALPH_GH_WORKSPACE:-}"
 RALPH_GH_LABEL="${RALPH_GH_LABEL:-ralph}"
-RALPH_GH_POLL_INTERVAL="${RALPH_GH_POLL_INTERVAL:-1800}"
 RALPH_GH_MAIN_BRANCH="${RALPH_GH_MAIN_BRANCH:-main}"
 CLAUDE_TIMEOUT_MINUTES="${CLAUDE_TIMEOUT_MINUTES:-15}"
 RALPH_GH_ALLOWED_TOOLS="${RALPH_GH_ALLOWED_TOOLS:-Write,Read,Edit,Bash(git add *),Bash(git commit *),Bash(git diff *),Bash(git log *),Bash(git status),Bash(git status *),Bash(git push *),Bash(git pull *),Bash(git fetch *),Bash(git checkout *),Bash(git branch *),Bash(git stash *),Bash(git merge *),Bash(git tag *),Bash(npm *),Bash(pnpm *),Bash(node *),Bash(find *)}"
@@ -155,9 +154,6 @@ process_parent_group() {
             break
         fi
 
-        # Check pause state before each sub-issue
-        wait_if_paused
-
         log_status "LOOP" "=== Sub-issue #$sub_number ==="
 
         # Clear session from previous sub-issue (prevent context bleed)
@@ -243,6 +239,20 @@ process_parent_group() {
     return 0
 }
 
+# Build a formatted list of completed sub-issues (used for PRs and comments)
+build_completed_subs_list() {
+    local completed_subs
+    completed_subs=$(get_completed_subs)
+    local list=""
+    while IFS= read -r sub; do
+        [[ -z "$sub" ]] && continue
+        local title
+        title=$(get_issue_title "$RALPH_GH_REPO" "$sub")
+        list+="- #${sub} - ${title}"$'\n'
+    done <<< "$completed_subs"
+    echo "${list:-None}"
+}
+
 # Complete a parent group: push, PR, close sub-issues, remove label
 complete_group() {
     local parent_number=$1
@@ -280,13 +290,8 @@ complete_group() {
             "Completed by ralph-gh. PR opened."
     else
         # Parent with sub-issues
-        local completed_list=""
-        while IFS= read -r sub; do
-            [[ -z "$sub" ]] && continue
-            local title
-            title=$(get_issue_title "$RALPH_GH_REPO" "$sub")
-            completed_list+="- #${sub} - ${title}"$'\n'
-        done <<< "$completed_subs"
+        local completed_list
+        completed_list=$(build_completed_subs_list)
 
         log_status "INFO" "Opening PR..."
         open_pr "$RALPH_GH_REPO" "$branch_name" "$RALPH_GH_MAIN_BRANCH" \
@@ -327,19 +332,8 @@ abort_group() {
     push_branch "$branch_name" || true
 
     # Build completed subs list
-    local completed_list=""
-    local completed_subs
-    completed_subs=$(get_completed_subs)
-    while IFS= read -r sub; do
-        [[ -z "$sub" ]] && continue
-        local title
-        title=$(get_issue_title "$RALPH_GH_REPO" "$sub")
-        completed_list+="- #${sub} - ${title}"$'\n'
-    done <<< "$completed_subs"
-
-    if [[ -z "$completed_list" ]]; then
-        completed_list="None"
-    fi
+    local completed_list
+    completed_list=$(build_completed_subs_list)
 
     # Get parent title
     local parent_title
@@ -361,33 +355,16 @@ A draft PR has been opened with the partial work completed so far. The \`$RALPH_
 **Completed sub-issues:**
 $completed_list"
 
-    # Clear in_progress but do NOT add to processed (human re-labels to retry)
-    # Also do NOT remove the label
+    # Clear in_progress and mark as processed for THIS run (skips re-pick in same run).
+    # Label is kept so the next `ralph-gh run` can re-trigger it.
     clear_in_progress
+    mark_parent_processed "$parent_number"
 
     log_status "WARN" "Parent #$parent_number aborted. Draft PR opened. Label kept for retry."
 }
 
 # =============================================================================
-# PAUSE / RESUME
-# =============================================================================
-
-# Check if paused and block until resumed
-wait_if_paused() {
-    local pause_file="$RALPH_GH_STATE_DIR/.paused"
-    if [[ ! -f "$pause_file" ]]; then
-        return 0
-    fi
-
-    log_status "INFO" "Paused — waiting for resume (remove $pause_file or run ralph-gh --resume)..."
-    while [[ -f "$pause_file" ]]; do
-        sleep 5
-    done
-    log_status "INFO" "Resumed — continuing work"
-}
-
-# =============================================================================
-# POLL LOOP
+# FETCH AND PROCESS
 # =============================================================================
 
 poll_and_process() {
@@ -463,10 +440,10 @@ poll_and_process() {
 }
 
 # =============================================================================
-# MAIN
+# RUN COMMAND
 # =============================================================================
 
-main() {
+run_command() {
     echo ""
     echo "================================================"
     echo "  ralph-gh - Autonomous GitHub Issue Worker"
@@ -475,6 +452,9 @@ main() {
 
     # Load config (3-layer)
     load_config
+
+    # Apply CLI --label override after config loading
+    [[ -n "${_LABEL_OVERRIDE:-}" ]] && RALPH_GH_LABEL="$_LABEL_OVERRIDE"
 
     # Validate environment
     validate_environment
@@ -496,56 +476,68 @@ main() {
     # Trap Ctrl+C / SIGTERM — kill entire process group for clean shutdown
     trap 'log_status "WARN" "Caught signal, shutting down..."; kill 0 2>/dev/null; exit 130' INT TERM
 
+    # Fresh run: clear processed list (label removal is the primary dedup)
+    clear_processed
+
     log_status "INFO" "Workspace: $RALPH_GH_WORKSPACE"
     log_status "INFO" "Repo: $RALPH_GH_REPO"
     log_status "INFO" "Label: $RALPH_GH_LABEL"
-    log_status "INFO" "Poll interval: ${RALPH_GH_POLL_INTERVAL}s"
     log_status "INFO" "Main branch: $RALPH_GH_MAIN_BRANCH"
 
-    # Check for in-progress work to resume
+    # Resume in-progress work if any (crash recovery)
     if has_in_progress; then
         local resume_parent
         resume_parent=$(get_in_progress_parent)
         log_status "INFO" "Resuming in-progress work on parent #$resume_parent"
-        wait_if_paused
         process_parent_group
+        cd "$RALPH_GH_WORKSPACE"
+        git checkout "$RALPH_GH_MAIN_BRANCH" 2>/dev/null || true
     fi
 
-    # Main poll loop
-    while true; do
-        wait_if_paused
-
-        # Try to find and set up new work
-        if ! has_in_progress; then
-            if poll_and_process; then
-                # Found work, process it
-                process_parent_group
-            else
-                # No work found, sleep
-                log_status "INFO" "Sleeping for ${RALPH_GH_POLL_INTERVAL}s..."
-                sleep "$RALPH_GH_POLL_INTERVAL"
-            fi
-        else
-            # Still have in-progress work (shouldn't normally reach here)
-            process_parent_group
-        fi
-
-        # Return to main branch after processing
+    # Process all labeled issues until none remain
+    while poll_and_process; do
+        process_parent_group
         cd "$RALPH_GH_WORKSPACE"
         git checkout "$RALPH_GH_MAIN_BRANCH" 2>/dev/null || true
     done
+
+    log_status "SUCCESS" "Run complete. No more labeled issues to process."
 }
 
-# Handle CLI arguments
+# =============================================================================
+# CLI
+# =============================================================================
+
 case "${1:-}" in
+    run)
+        shift
+        # Parse --label flag
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --label)
+                    if [[ -n "${2:-}" ]]; then
+                        _LABEL_OVERRIDE="$2"
+                        shift 2
+                    else
+                        echo "Error: --label requires a value"
+                        exit 1
+                    fi
+                    ;;
+                *)
+                    echo "Unknown option: $1"
+                    echo "Usage: ralph-gh run [--label LABEL]"
+                    exit 1
+                    ;;
+            esac
+        done
+        run_command
+        ;;
     --status)
         load_config
         cd "$RALPH_GH_WORKSPACE"
         init_state
         echo "=== ralph-gh Status ==="
-        if [[ -f "$RALPH_GH_STATE_DIR/.paused" ]]; then
-            echo "State: PAUSED"
-        elif flock -n "$RALPH_GH_STATE_DIR/.lock" true 2>/dev/null; then
+        if flock -n "$RALPH_GH_STATE_DIR/.lock" true 2>/dev/null; then
             echo "State: STOPPED"
         else
             echo "State: RUNNING"
@@ -567,24 +559,6 @@ case "${1:-}" in
         clear_in_progress
         reset_circuit_breaker
         echo "State and circuit breaker reset"
-        ;;
-    --pause)
-        load_config
-        cd "$RALPH_GH_WORKSPACE"
-        mkdir -p "$RALPH_GH_STATE_DIR"
-        touch "$RALPH_GH_STATE_DIR/.paused"
-        echo "ralph-gh paused. Current sub-issue will finish before pausing."
-        echo "Run 'ralph-gh --resume' to continue."
-        ;;
-    --resume)
-        load_config
-        cd "$RALPH_GH_WORKSPACE"
-        if [[ -f "$RALPH_GH_STATE_DIR/.paused" ]]; then
-            rm -f "$RALPH_GH_STATE_DIR/.paused"
-            echo "ralph-gh resumed."
-        else
-            echo "ralph-gh is not paused."
-        fi
         ;;
     --kill)
         load_config
@@ -617,18 +591,18 @@ case "${1:-}" in
         else
             echo "ralph-gh is not running (no lock file)."
         fi
-        rm -f "$RALPH_GH_STATE_DIR/.paused"
         ;;
-    --help|-h)
+    --help|-h|"")
         echo "ralph-gh - Autonomous GitHub Issue Worker"
         echo ""
-        echo "Usage: ralph-gh.sh [options]"
+        echo "Usage: ralph-gh run [--label LABEL]"
+        echo ""
+        echo "Commands:"
+        echo "  run [--label LABEL]  Process all labeled issues and exit"
         echo ""
         echo "Options:"
         echo "  --status    Show current status"
         echo "  --reset     Reset state and circuit breaker"
-        echo "  --pause     Pause after current sub-issue completes"
-        echo "  --resume    Resume a paused instance"
         echo "  --kill      Kill running instance and all child processes"
         echo "  --help      Show this help"
         echo ""
@@ -638,14 +612,15 @@ case "${1:-}" in
         echo "  Prompt:  <workspace>/.ralph/PROMPT.md"
         echo ""
         echo "Environment variables:"
-        echo "  RALPH_GH_REPO         Repository (owner/repo)"
-        echo "  RALPH_GH_WORKSPACE    Path to local repo clone"
-        echo "  RALPH_GH_LABEL        Issue label to watch (default: ralph)"
-        echo "  RALPH_GH_POLL_INTERVAL  Seconds between polls (default: 1800)"
-        echo "  RALPH_GH_MAIN_BRANCH  Base branch (default: main)"
-        echo "  CLAUDE_TIMEOUT_MINUTES  Max time per sub-issue (default: 15)"
+        echo "  RALPH_GH_REPO              Repository (owner/repo)"
+        echo "  RALPH_GH_WORKSPACE         Path to local repo clone"
+        echo "  RALPH_GH_LABEL             Issue label to watch (default: ralph)"
+        echo "  RALPH_GH_MAIN_BRANCH       Base branch (default: main)"
+        echo "  CLAUDE_TIMEOUT_MINUTES     Max time per sub-issue (default: 15)"
         ;;
     *)
-        main
+        echo "Unknown command: $1"
+        echo "Run 'ralph-gh --help' for usage."
+        exit 1
         ;;
 esac
