@@ -380,12 +380,9 @@ poll_and_process() {
         return 1
     fi
 
-    # Filter out already-processed issues
+    # Filter out already-processed issues and find a ready candidate
     local candidate_count
     candidate_count=$(echo "$issues_json" | jq 'length')
-
-    local parent_number=""
-    local parent_body=""
 
     for i in $(seq 0 $((candidate_count - 1))); do
         local num
@@ -396,51 +393,51 @@ poll_and_process() {
             continue
         fi
 
-        parent_number="$num"
-        parent_body=$(echo "$issues_json" | jq -r ".[$i].body")
-        break
-    done
+        local body
+        body=$(echo "$issues_json" | jq -r ".[$i].body")
 
-    if [[ -z "$parent_number" ]]; then
-        log_status "INFO" "All labeled issues have been processed"
-        update_last_poll
-        return 1
-    fi
+        log_status "INFO" "Found issue #$num"
 
-    log_status "INFO" "Found issue #$parent_number"
+        # Parse task list from issue body
+        local sub_issues
+        sub_issues=$(parse_task_list "$body")
 
-    # Parse task list from issue body
-    local sub_issues
-    sub_issues=$(parse_task_list "$parent_body")
+        local branch_name="ralph/issue-${num}"
 
-    local branch_name="ralph/issue-${parent_number}"
+        if [[ -z "$sub_issues" ]]; then
+            # Standalone issue (no sub-issues) — treat the issue itself as the work
+            log_status "INFO" "Issue #$num is a standalone issue (no task list)"
+            set_in_progress "$num" "$branch_name" "$num"
+            log_status "SUCCESS" "Set up work for standalone issue #$num"
+            update_last_poll
+            return 0
+        fi
 
-    if [[ -z "$sub_issues" ]]; then
-        # Standalone issue (no sub-issues) — treat the issue itself as the work
-        log_status "INFO" "Issue #$parent_number is a standalone issue (no task list)"
-        set_in_progress "$parent_number" "$branch_name" "$parent_number"
-        log_status "SUCCESS" "Set up work for standalone issue #$parent_number"
-    else
         log_status "INFO" "Found sub-issues: $(echo "$sub_issues" | tr '\n' ' ')"
 
-        # Validate sub-issues are open
+        # Validate all sub-issues exist and are open
         local valid_subs
         mapfile -t sub_array <<< "$sub_issues"
-        valid_subs=$(validate_sub_issues "$RALPH_GH_REPO" "${sub_array[@]}")
+        if ! valid_subs=$(validate_sub_issues "$RALPH_GH_REPO" "${sub_array[@]}"); then
+            log_status "INFO" "Deferring parent #$num — waiting for all sub-issues to be created"
+            continue
+        fi
 
         if [[ -z "$valid_subs" ]]; then
-            log_status "WARN" "No valid open sub-issues found for parent #$parent_number"
-            update_last_poll
-            return 1
+            log_status "WARN" "No valid open sub-issues found for parent #$num"
+            continue
         fi
 
         mapfile -t valid_sub_array <<< "$valid_subs"
-        set_in_progress "$parent_number" "$branch_name" "${valid_sub_array[@]}"
-        log_status "SUCCESS" "Set up work for parent #$parent_number with ${#valid_sub_array[@]} sub-issues"
-    fi
+        set_in_progress "$num" "$branch_name" "${valid_sub_array[@]}"
+        log_status "SUCCESS" "Set up work for parent #$num with ${#valid_sub_array[@]} sub-issues"
+        update_last_poll
+        return 0
+    done
 
+    log_status "INFO" "No ready issues found (all processed or waiting for sub-issues)"
     update_last_poll
-    return 0
+    return 1
 }
 
 # =============================================================================

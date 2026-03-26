@@ -114,22 +114,36 @@ check_github_available() {
     return 0
 }
 
-# Validate that sub-issues exist and are open
-# Returns only valid, open sub-issue numbers (one per line)
+# Check that all sub-issues exist and are open
+# Returns 0 if all exist and are open, 1 if any are missing or closed
+# Outputs only the valid open sub-issue numbers (one per line)
 validate_sub_issues() {
     local repo=$1
     shift
     local sub_issues=("$@")
 
+    local all_valid=true
+    local valid_subs=()
+
     for sub in "${sub_issues[@]}"; do
         local state
         state=$(gh issue view "$sub" --repo "$repo" --json state --jq '.state' 2>/dev/null)
-        if [[ "$state" == "OPEN" ]]; then
-            echo "$sub"
+        if [[ -z "$state" ]]; then
+            log_status "WARN" "Sub-issue #$sub does not exist yet, deferring parent"
+            all_valid=false
+        elif [[ "$state" == "OPEN" ]]; then
+            valid_subs+=("$sub")
         else
-            log_status "WARN" "Sub-issue #$sub is not open (state: ${state:-not found}), skipping"
+            log_status "WARN" "Sub-issue #$sub is not open (state: $state), skipping"
         fi
     done
+
+    if [[ "$all_valid" == "false" ]]; then
+        return 1
+    fi
+
+    printf '%s\n' "${valid_subs[@]}"
+    return 0
 }
 
 export -f poll_for_parent_issues parse_task_list parse_completed_tasks
