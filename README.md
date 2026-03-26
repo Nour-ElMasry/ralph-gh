@@ -29,6 +29,7 @@ It handles **standalone issues** (single tasks) and **parent issues with sub-tas
                      |                          Creates branch  |
                      |                          Runs Claude Code|
                      |                          Commits changes |
+                     |                          Checks off subs |
                      |                          Pushes + opens PR|
                      |                                          |
                      |  PR ready for review                     |
@@ -59,7 +60,7 @@ Probably a z-index or touch event issue.
 - [ ] #14 Write integration tests
 ```
 
-ralph-gh works each `- [ ] #N` sequentially on a single branch. One PR for the whole group.
+ralph-gh works each `- [ ] #N` sequentially on a single branch. As each sub-issue completes, its checkbox is checked off (`- [x] #N`) in real time so you can track progress from GitHub. One PR for the whole group.
 
 ## Quick start
 
@@ -157,6 +158,7 @@ ralph-gh is designed to be **conservative, not clever**.
 - **No auto-merge** — always opens a PR for human review. You decide what ships.
 - **Circuit breaker** — if Claude gets stuck (no progress after N attempts), it stops, opens a draft PR with whatever it has, and comments on the issue explaining what went wrong.
 - **Resumable** — kill the process mid-work, restart it, and it picks up where it left off from `state.json`.
+- **Progress tracking** — sub-issue checkboxes are checked off in the parent issue as each one completes. Sub-issues are closed after the PR is opened.
 - **Failure is loud** — on abort: draft PR + GitHub comment with the failure reason. The label stays so you can re-trigger after fixing the issue.
 
 ## Architecture
