@@ -136,8 +136,12 @@ process_parent_group() {
     # Clear session from any previous group
     clear_saved_session
 
-    # Create/checkout the branch
-    ensure_latest_main "$RALPH_GH_MAIN_BRANCH"
+    # Create/checkout the branch (skip sync if already on the work branch — resuming)
+    local current_branch
+    current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+    if [[ "$current_branch" != "$branch_name" ]]; then
+        ensure_latest_main "$RALPH_GH_MAIN_BRANCH"
+    fi
     if ! create_branch "$branch_name" "$RALPH_GH_MAIN_BRANCH"; then
         log_status "ERROR" "Failed to create branch $branch_name"
         abort_group "$parent_number" "$branch_name" "Failed to create branch"
