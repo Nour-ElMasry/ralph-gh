@@ -414,7 +414,16 @@ poll_and_process() {
         local sub_issues
         sub_issues=$(parse_task_list "$body")
 
-        local branch_name="ralph/issue-${num}"
+        # If already on a non-main branch, use it; otherwise create a new one
+        local current_branch
+        current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+        local branch_name
+        if [[ "$current_branch" != "$RALPH_GH_MAIN_BRANCH" ]]; then
+            branch_name="$current_branch"
+            log_status "INFO" "Using current branch '$branch_name' instead of creating new branch"
+        else
+            branch_name="ralph/issue-${num}"
+        fi
 
         if [[ -z "$sub_issues" ]]; then
             # Standalone issue (no sub-issues) — treat the issue itself as the work
