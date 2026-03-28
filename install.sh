@@ -83,6 +83,12 @@ else
     echo "Config already exists: $INSTALL_DIR/ralph-gh.conf (not overwritten)"
 fi
 
+# Add to PATH via symlink
+BIN_DIR="$HOME/.local/bin"
+mkdir -p "$BIN_DIR"
+ln -sf "$INSTALL_DIR/ralph-gh.sh" "$BIN_DIR/ralph-gh"
+echo "Symlinked: $BIN_DIR/ralph-gh -> $INSTALL_DIR/ralph-gh.sh"
+
 echo ""
 echo "================================================"
 echo "  Installation complete!"
@@ -102,11 +108,8 @@ echo "  4. Create the 'ralph' label on your repo:"
 echo "     gh label create ralph --repo OWNER/REPO --description 'ralph-gh automation' --color '0E8A16'"
 echo ""
 echo "  5. Run ralph-gh:"
-echo "     $INSTALL_DIR/ralph-gh.sh"
+echo "     ralph-gh run"
 echo ""
 echo "  Or run in tmux:"
-echo "     tmux new -s ralph-gh '$INSTALL_DIR/ralph-gh.sh'"
-echo ""
-echo "  Or add to PATH:"
-echo "     ln -s $INSTALL_DIR/ralph-gh.sh /usr/local/bin/ralph-gh"
+echo "     tmux new -s ralph-gh 'ralph-gh run'"
 echo ""
