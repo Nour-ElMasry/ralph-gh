@@ -377,6 +377,60 @@ $completed_list" || true
 }
 
 # =============================================================================
+# TARGETED ISSUE PROCESSING
+# =============================================================================
+
+# Process a single explicitly-specified issue (no label required)
+process_targeted_issue() {
+    local issue_number=$1
+
+    log_status "INFO" "Fetching targeted issue #$issue_number..."
+
+    # Fetch and validate the issue is open
+    local issue_json
+    if ! issue_json=$(fetch_issue_details "$RALPH_GH_REPO" "$issue_number"); then
+        return 1
+    fi
+
+    local body
+    body=$(echo "$issue_json" | jq -r '.body')
+
+    # Parse task list from issue body
+    local sub_issues
+    sub_issues=$(parse_task_list "$body")
+
+    local branch_name="ralph/issue-${issue_number}"
+
+    if [[ -z "$sub_issues" ]]; then
+        # Standalone issue
+        log_status "INFO" "Issue #$issue_number is a standalone issue (no task list)"
+        set_in_progress "$issue_number" "$branch_name" "$issue_number"
+    else
+        log_status "INFO" "Found sub-issues: $(echo "$sub_issues" | tr '\n' ' ')"
+
+        # Validate all sub-issues exist and are open
+        local valid_subs
+        mapfile -t sub_array <<< "$sub_issues"
+        if ! valid_subs=$(validate_sub_issues "$RALPH_GH_REPO" "${sub_array[@]}"); then
+            log_status "ERROR" "Not all sub-issues are ready for parent #$issue_number"
+            return 1
+        fi
+
+        if [[ -z "$valid_subs" ]]; then
+            log_status "ERROR" "No valid open sub-issues found for #$issue_number"
+            return 1
+        fi
+
+        mapfile -t valid_sub_array <<< "$valid_subs"
+        set_in_progress "$issue_number" "$branch_name" "${valid_sub_array[@]}"
+        log_status "SUCCESS" "Set up work for parent #$issue_number with ${#valid_sub_array[@]} sub-issues"
+    fi
+
+    process_parent_group
+    return $?
+}
+
+# =============================================================================
 # FETCH AND PROCESS
 # =============================================================================
 
@@ -516,14 +570,26 @@ run_command() {
         git checkout "$RALPH_GH_MAIN_BRANCH" 2>/dev/null || true
     fi
 
-    # Process all labeled issues until none remain
-    while poll_and_process; do
-        process_parent_group
-        cd "$RALPH_GH_WORKSPACE"
-        git checkout "$RALPH_GH_MAIN_BRANCH" 2>/dev/null || true
-    done
-
-    log_status "SUCCESS" "Run complete. No more labeled issues to process."
+    # Process targeted issues or fall back to label polling
+    if [[ ${#_TARGET_ISSUES[@]} -gt 0 ]]; then
+        log_status "INFO" "Processing ${#_TARGET_ISSUES[@]} targeted issue(s): ${_TARGET_ISSUES[*]}"
+        for target_num in "${_TARGET_ISSUES[@]}"; do
+            if ! process_targeted_issue "$target_num"; then
+                log_status "WARN" "Failed to process targeted issue #$target_num, continuing..."
+            fi
+            cd "$RALPH_GH_WORKSPACE"
+            git checkout "$RALPH_GH_MAIN_BRANCH" 2>/dev/null || true
+        done
+        log_status "SUCCESS" "Run complete. All targeted issues processed."
+    else
+        # Process all labeled issues until none remain
+        while poll_and_process; do
+            process_parent_group
+            cd "$RALPH_GH_WORKSPACE"
+            git checkout "$RALPH_GH_MAIN_BRANCH" 2>/dev/null || true
+        done
+        log_status "SUCCESS" "Run complete. No more labeled issues to process."
+    fi
 }
 
 # =============================================================================
@@ -533,7 +599,8 @@ run_command() {
 case "${1:-}" in
     run)
         shift
-        # Parse --label flag
+        _TARGET_ISSUES=()
+        # Parse flags and positional args (issue numbers)
         while [[ $# -gt 0 ]]; do
             case "$1" in
                 --label)
@@ -545,10 +612,20 @@ case "${1:-}" in
                         exit 1
                     fi
                     ;;
-                *)
+                -*)
                     echo "Unknown option: $1"
-                    echo "Usage: ralph-gh run [--label LABEL]"
+                    echo "Usage: ralph-gh run [--label LABEL] [ISSUE_NUMBER ...]"
                     exit 1
+                    ;;
+                *)
+                    # Positional arg — must be a number
+                    if [[ "$1" =~ ^[0-9]+$ ]]; then
+                        _TARGET_ISSUES+=("$1")
+                    else
+                        echo "Error: '$1' is not a valid issue number"
+                        exit 1
+                    fi
+                    shift
                     ;;
             esac
         done
@@ -617,10 +694,15 @@ case "${1:-}" in
     --help|-h|"")
         echo "ralph-gh - Autonomous GitHub Issue Worker"
         echo ""
-        echo "Usage: ralph-gh run [--label LABEL]"
+        echo "Usage: ralph-gh run [--label LABEL] [ISSUE_NUMBER ...]"
         echo ""
         echo "Commands:"
-        echo "  run [--label LABEL]  Process all labeled issues and exit"
+        echo "  run [--label LABEL] [ISSUE ...]  Process issues and exit"
+        echo ""
+        echo "  When issue numbers are given, ralph works on those specific issues"
+        echo "  (no label required). Parent issues with sub-issue checklists will"
+        echo "  process all sub-issues on one branch. Without issue numbers, ralph"
+        echo "  polls for all open issues with the target label."
         echo ""
         echo "Options:"
         echo "  --status    Show current status"

@@ -167,7 +167,35 @@ validate_sub_issues() {
     return 0
 }
 
+# Fetch a single issue by number and validate it's open
+# Returns JSON object with number, title, body, createdAt — same shape as poll_for_parent_issues elements
+# Returns 1 if issue doesn't exist or is not open
+fetch_issue_details() {
+    local repo=$1
+    local issue_number=$2
+
+    local json
+    json=$(gh issue view "$issue_number" \
+        --repo "$repo" \
+        --json number,title,body,createdAt,state < /dev/null 2>/dev/null)
+
+    if [[ -z "$json" ]]; then
+        log_status "ERROR" "Issue #$issue_number not found in $repo"
+        return 1
+    fi
+
+    local state
+    state=$(echo "$json" | jq -r '.state')
+    if [[ "$state" != "OPEN" ]]; then
+        log_status "ERROR" "Issue #$issue_number is not open (state: $state)"
+        return 1
+    fi
+
+    # Return without the state field to match poll_for_parent_issues shape
+    echo "$json" | jq '{number, title, body, createdAt}'
+}
+
 export -f poll_for_parent_issues parse_task_list parse_completed_tasks
-export -f get_issue_title get_issue_body
+export -f get_issue_title get_issue_body fetch_issue_details
 export -f close_sub_issue check_off_sub_issue remove_label comment_on_issue
 export -f check_github_available validate_sub_issues
