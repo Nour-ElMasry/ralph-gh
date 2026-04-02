@@ -33,11 +33,40 @@ RALPH_GH_MAX_LOOPS_PER_ISSUE="${RALPH_GH_MAX_LOOPS_PER_ISSUE:-5}"  # Max Claude 
 RALPH_GH_MAX_LOOPS_TOTAL="${RALPH_GH_MAX_LOOPS_TOTAL:-0}"          # Max total invocations per parent group (0=unlimited)
 
 # =============================================================================
+# REPO AUTO-DETECTION
+# =============================================================================
+
+# Detect RALPH_GH_REPO and RALPH_GH_WORKSPACE from CWD git context.
+# If already set (env var or old global config), respect as override with deprecation warning.
+detect_repo_context() {
+    if [[ -n "$RALPH_GH_WORKSPACE" ]]; then
+        log_status "WARN" "RALPH_GH_WORKSPACE is set explicitly — this is deprecated. Run ralph-gh from inside your repo instead."
+    else
+        RALPH_GH_WORKSPACE=$(git rev-parse --show-toplevel 2>/dev/null) || {
+            log_status "ERROR" "Not inside a git repository. Run ralph-gh from inside your repo, or set RALPH_GH_WORKSPACE."
+            exit 1
+        }
+    fi
+
+    if [[ -n "$RALPH_GH_REPO" ]]; then
+        log_status "WARN" "RALPH_GH_REPO is set explicitly — this is deprecated. Run ralph-gh from inside your repo instead."
+    else
+        local remote_url
+        remote_url=$(git -C "$RALPH_GH_WORKSPACE" remote get-url origin 2>/dev/null) || {
+            log_status "ERROR" "No 'origin' remote found. Set RALPH_GH_REPO or add a git remote."
+            exit 1
+        }
+        # Parse owner/repo from SSH (git@github.com:owner/repo.git) or HTTPS URLs
+        RALPH_GH_REPO=$(echo "$remote_url" | sed -E 's#^.+github\.com[:/]##; s#\.git$##')
+    fi
+}
+
+# =============================================================================
 # CONFIG LOADING (3-layer: defaults -> global -> project)
 # =============================================================================
 
 load_config() {
-    # Layer 2: Global config
+    # Layer 1: Global config (non-repo settings: timeouts, thresholds, tools)
     local global_config="$HOME/.ralph-gh/ralph-gh.conf"
     if [[ -f "$global_config" ]]; then
         log_status "INFO" "Loading global config: $global_config"
@@ -45,8 +74,11 @@ load_config() {
         source "$global_config"
     fi
 
+    # Layer 2: Auto-detect repo and workspace from CWD
+    detect_repo_context
+
     # Layer 3: Project config (.ralphrc at workspace root)
-    if [[ -n "$RALPH_GH_WORKSPACE" && -f "$RALPH_GH_WORKSPACE/.ralphrc" ]]; then
+    if [[ -f "$RALPH_GH_WORKSPACE/.ralphrc" ]]; then
         log_status "INFO" "Loading project config: $RALPH_GH_WORKSPACE/.ralphrc"
         # shellcheck source=/dev/null
         source "$RALPH_GH_WORKSPACE/.ralphrc"
@@ -74,22 +106,8 @@ load_config() {
 validate_environment() {
     local errors=0
 
-    # Check required config
-    if [[ -z "$RALPH_GH_REPO" ]]; then
-        log_status "ERROR" "RALPH_GH_REPO is not set (e.g., 'owner/repo')"
-        errors=$((errors + 1))
-    fi
-
-    if [[ -z "$RALPH_GH_WORKSPACE" ]]; then
-        log_status "ERROR" "RALPH_GH_WORKSPACE is not set (path to local repo clone)"
-        errors=$((errors + 1))
-    elif [[ ! -d "$RALPH_GH_WORKSPACE" ]]; then
-        log_status "ERROR" "RALPH_GH_WORKSPACE does not exist: $RALPH_GH_WORKSPACE"
-        errors=$((errors + 1))
-    elif [[ ! -d "$RALPH_GH_WORKSPACE/.git" ]]; then
-        log_status "ERROR" "RALPH_GH_WORKSPACE is not a git repo: $RALPH_GH_WORKSPACE"
-        errors=$((errors + 1))
-    fi
+    # RALPH_GH_REPO and RALPH_GH_WORKSPACE are auto-detected by detect_repo_context()
+    # and guaranteed to be set before this function is called.
 
     # Check claude CLI
     if ! command -v claude &>/dev/null; then
@@ -741,18 +759,26 @@ case "${1:-}" in
             echo "ralph-gh is not running (no lock file)."
         fi
         ;;
+    setup)
+        shift
+        # Delegate to setup.sh (supports auto-detection or explicit repo arg)
+        exec "$SCRIPT_DIR/setup.sh" "$@"
+        ;;
     --help|-h|"")
         echo "ralph-gh - Autonomous GitHub Issue Worker"
         echo ""
-        echo "Usage: ralph-gh run [--label LABEL] [ISSUE_NUMBER ...]"
+        echo "Usage: cd <your-repo> && ralph-gh run [--label LABEL] [ISSUE_NUMBER ...]"
+        echo ""
+        echo "  Repo and workspace are auto-detected from the current directory."
+        echo "  Just cd into any git repo with a GitHub remote and run."
         echo ""
         echo "Commands:"
+        echo "  setup [OWNER/REPO]               Create 'ralph' label (auto-detects repo)"
         echo "  run [--label LABEL] [ISSUE ...]  Process issues and exit"
         echo ""
         echo "  When issue numbers are given, ralph works on those specific issues"
-        echo "  (no label required). Parent issues with sub-issue checklists will"
-        echo "  process all sub-issues on one branch. Without issue numbers, ralph"
-        echo "  polls for all open issues with the target label."
+        echo "  (no label required) in isolated git worktrees. Without issue numbers,"
+        echo "  ralph polls for all open issues with the target label."
         echo ""
         echo "Options:"
         echo "  --status    Show current status"
@@ -761,16 +787,16 @@ case "${1:-}" in
         echo "  --help      Show this help"
         echo ""
         echo "Configuration:"
-        echo "  Global:  ~/.ralph-gh/ralph-gh.conf"
-        echo "  Project: <workspace>/.ralphrc"
-        echo "  Prompt:  <workspace>/.ralph/PROMPT.md"
+        echo "  Global:  ~/.ralph-gh/ralph-gh.conf (timeouts, thresholds)"
+        echo "  Project: <repo>/.ralphrc (per-repo overrides)"
+        echo "  Prompt:  <repo>/.ralph/PROMPT.md"
         echo ""
         echo "Environment variables:"
-        echo "  RALPH_GH_REPO              Repository (owner/repo)"
-        echo "  RALPH_GH_WORKSPACE         Path to local repo clone"
         echo "  RALPH_GH_LABEL             Issue label to watch (default: ralph)"
         echo "  RALPH_GH_MAIN_BRANCH       Base branch (default: main)"
         echo "  CLAUDE_TIMEOUT_MINUTES     Max time per sub-issue (default: 15)"
+        echo "  RALPH_GH_REPO              Override auto-detected repo (deprecated)"
+        echo "  RALPH_GH_WORKSPACE         Override auto-detected workspace (deprecated)"
         ;;
     *)
         echo "Unknown command: $1"

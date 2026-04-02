@@ -6,10 +6,15 @@ set -euo pipefail
 REPO="${1:-}"
 
 if [[ -z "$REPO" ]]; then
-    echo "Usage: ./setup.sh OWNER/REPO"
-    echo ""
-    echo "Creates the 'ralph' label on the specified GitHub repository."
-    exit 1
+    # Auto-detect from CWD
+    remote_url=$(git remote get-url origin 2>/dev/null) || {
+        echo "Usage: ./setup.sh [OWNER/REPO]"
+        echo ""
+        echo "Or run from inside a git repo for auto-detection."
+        exit 1
+    }
+    REPO=$(echo "$remote_url" | sed -E 's#^.+github\.com[:/]##; s#\.git$##')
+    echo "Auto-detected repo: $REPO"
 fi
 
 echo "Creating 'ralph' label on $REPO..."

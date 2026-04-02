@@ -1,9 +1,8 @@
 # ralph-gh.conf - Global configuration
 # Copy to ~/.ralph-gh/ralph-gh.conf and edit
-
-# Required
-RALPH_GH_REPO=""                          # e.g., Nour-ElMasry/lead-formz
-RALPH_GH_WORKSPACE=""                     # Local path to repo clone
+#
+# Repo and workspace are auto-detected from CWD (just cd into your repo).
+# Override per-repo settings in .ralphrc at your repo root.
 
 # Optional (defaults shown)
 RALPH_GH_LABEL="ralph"                    # Label that triggers automation

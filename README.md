@@ -71,28 +71,14 @@ cd ralph-gh
 ./install.sh
 ```
 
-Then configure it:
+Then set up your repo:
 
 ```bash
-$EDITOR ~/.ralph-gh/ralph-gh.conf
+cd /path/to/your/repo
+ralph-gh setup       # Creates the 'ralph' label (auto-detects repo from git remote)
 ```
 
-```bash
-# The two things you must set:
-RALPH_GH_REPO="you/your-repo"
-RALPH_GH_WORKSPACE="/path/to/local/clone"
-```
-
-Create the label and run:
-
-```bash
-./setup.sh you/your-repo
-
-# Process all labeled issues
-ralph-gh run
-```
-
-That's it. Label an issue `ralph`, run `ralph-gh run`, and watch it go.
+That's it. Label an issue `ralph`, run `ralph-gh run` from inside your repo, and watch it go. No config file needed — repo and workspace are auto-detected from your current directory.
 
 ### Uninstalling
 
@@ -115,10 +101,10 @@ This removes `~/.ralph-gh/` and the `ralph-gh` symlink. Per-project files (`.ral
 
 ### Global (`~/.ralph-gh/ralph-gh.conf`)
 
+Repo and workspace are **auto-detected** from your current directory's git remote. The global config only holds settings that apply across all repos:
+
 | Variable | Default | What it does |
 |---|---|---|
-| `RALPH_GH_REPO` | *(required)* | Target repo (`owner/repo`) |
-| `RALPH_GH_WORKSPACE` | *(required)* | Path to your local clone |
 | `RALPH_GH_LABEL` | `ralph` | The magic label |
 | `RALPH_GH_MAIN_BRANCH` | `main` | Base branch for PRs |
 | `CLAUDE_TIMEOUT_MINUTES` | `15` | Max time Claude gets per sub-issue |
@@ -136,15 +122,18 @@ ralph-gh respects the same config files as [ralph-claude-code](https://github.co
 | `.ralph/PROMPT.md` | System prompt for Claude — your tech stack, conventions, architecture |
 | `.ralph/AGENT.md` | Build/test/run instructions (appended to the prompt) |
 
-**Config priority:** built-in defaults < `~/.ralph-gh/ralph-gh.conf` < `.ralphrc`
+**Config priority:** built-in defaults < `~/.ralph-gh/ralph-gh.conf` < `.ralphrc` < env vars
 
 ## CLI
+
+All commands auto-detect repo and workspace from your current directory.
 
 ```bash
 ralph-gh run              # Process all labeled issues sequentially
 ralph-gh run 42           # Work on issue #42 in an isolated worktree
 ralph-gh run 42 99        # Work on #42 then #99 (sequential, each in its own worktree)
 ralph-gh run --label foo  # Override label for this run
+ralph-gh setup            # Create 'ralph' label on the current repo
 ralph-gh --status         # What's it doing right now?
 ralph-gh --kill           # Kill running instance and all child processes
 ralph-gh --reset          # Clear state + circuit breaker
