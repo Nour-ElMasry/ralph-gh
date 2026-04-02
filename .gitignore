@@ -3,6 +3,9 @@ ralph-gh.conf
 
 # State files (runtime data)
 .ralph-gh/
+
+# Worktree directories (parallel workers)
+.ralph-workers/
 state.json
 *.log
 

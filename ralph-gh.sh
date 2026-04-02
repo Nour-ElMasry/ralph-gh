@@ -15,6 +15,7 @@ source "$SCRIPT_DIR/lib/github_poller.sh"
 source "$SCRIPT_DIR/lib/branch_manager.sh"
 source "$SCRIPT_DIR/lib/circuit_breaker.sh"
 source "$SCRIPT_DIR/lib/issue_worker.sh"
+source "$SCRIPT_DIR/lib/worktree_manager.sh"
 
 # =============================================================================
 # DEFAULTS
@@ -516,6 +517,55 @@ poll_and_process() {
 }
 
 # =============================================================================
+# WORKTREE-ISOLATED TARGETED PROCESSING
+# =============================================================================
+
+# Process a targeted issue inside an isolated git worktree.
+# This allows multiple ralph instances to work on different issues concurrently.
+process_targeted_in_worktree() {
+    local issue_number=$1
+
+    log_status "INFO" "Setting up worktree for issue #$issue_number..."
+
+    # Set up worktree (creates it, acquires per-issue lock, redirects globals, cd's into it)
+    if ! worktree_setup "$issue_number" "$RALPH_GH_MAIN_BRANCH"; then
+        log_status "ERROR" "Failed to set up worktree for issue #$issue_number"
+        return 1
+    fi
+
+    # Set signal trap for clean shutdown inside worktree
+    trap "worktree_cleanup_on_signal $issue_number" INT TERM
+
+    # Initialize fresh state and circuit breaker inside the worktree
+    init_state
+    init_circuit_breaker
+
+    local result=0
+
+    # Check for in-progress work (resume after crash)
+    if has_in_progress; then
+        local resume_parent
+        resume_parent=$(get_in_progress_parent)
+        log_status "INFO" "Resuming in-progress work on parent #$resume_parent in worktree"
+        process_parent_group || result=$?
+    else
+        process_targeted_issue "$issue_number" || result=$?
+    fi
+
+    # Clean up worktree regardless of success/failure
+    worktree_cleanup "$issue_number"
+
+    # Restore default signal trap
+    trap 'log_status "WARN" "Caught signal, shutting down..."; kill 0 2>/dev/null; exit 130' INT TERM
+
+    if [[ $result -ne 0 ]]; then
+        log_status "WARN" "Failed to process targeted issue #$issue_number"
+    fi
+
+    return $result
+}
+
+# =============================================================================
 # RUN COMMAND
 # =============================================================================
 
@@ -540,13 +590,17 @@ run_command() {
     init_state
     init_circuit_breaker
 
-    # Acquire exclusive lock (prevents concurrent instances)
-    local lock_file="$RALPH_GH_STATE_DIR/.lock"
-    mkdir -p "$RALPH_GH_STATE_DIR"
-    exec 9>"$lock_file"
-    if ! flock -n 9; then
-        log_status "ERROR" "Another ralph-gh instance is already running (lock: $lock_file)"
-        exit 1
+    # Acquire exclusive lock for serial poller mode only.
+    # Targeted mode (issue numbers given) uses per-issue locks instead,
+    # allowing multiple ralph instances to run concurrently.
+    if [[ ${#_TARGET_ISSUES[@]} -eq 0 ]]; then
+        local lock_file="$RALPH_GH_STATE_DIR/.lock"
+        mkdir -p "$RALPH_GH_STATE_DIR"
+        exec 9>"$lock_file"
+        if ! flock -n 9; then
+            log_status "ERROR" "Another ralph-gh instance is already running (lock: $lock_file)"
+            exit 1
+        fi
     fi
 
     # Trap Ctrl+C / SIGTERM — kill entire process group for clean shutdown
@@ -572,13 +626,9 @@ run_command() {
 
     # Process targeted issues or fall back to label polling
     if [[ ${#_TARGET_ISSUES[@]} -gt 0 ]]; then
-        log_status "INFO" "Processing ${#_TARGET_ISSUES[@]} targeted issue(s): ${_TARGET_ISSUES[*]}"
+        log_status "INFO" "Processing ${#_TARGET_ISSUES[@]} targeted issue(s) via worktrees: ${_TARGET_ISSUES[*]}"
         for target_num in "${_TARGET_ISSUES[@]}"; do
-            if ! process_targeted_issue "$target_num"; then
-                log_status "WARN" "Failed to process targeted issue #$target_num, continuing..."
-            fi
-            cd "$RALPH_GH_WORKSPACE"
-            git checkout "$RALPH_GH_MAIN_BRANCH" 2>/dev/null || true
+            process_targeted_in_worktree "$target_num" || true
         done
         log_status "SUCCESS" "Run complete. All targeted issues processed."
     else
