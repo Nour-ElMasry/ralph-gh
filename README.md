@@ -18,19 +18,21 @@ Works on **any repo** — just `cd` in and run. Handles single issues, multi-ste
 
 ## The backstory
 
-It started, as most things do, at 2 AM.
+It started, as most things do, at 3 AM - but not by choice.
 
-I was mass-creating GitHub issues for my project — neatly scoped, beautifully written, the kind of issues that make you feel productive without actually *being* productive. Fifteen issues deep, I thought: "Wouldn't it be nice if someone just... did these?"
+My newborn had just woken up for the second time. I'm pacing the hallway, baby in one arm, phone in the other, scrolling through the fifteen GitHub issues I'd written earlier that day. Neatly scoped. The kind of issues that make you feel productive without actually *being* productive.
 
-So I looked at my options. Hire a developer? Too expensive. Do them myself? Too tired. Train my cat to code? She walked across the keyboard once and accidentally fixed a CSS bug, but I couldn't reproduce the results.
+Somewhere between the third feeding and the fourth diaper change, I thought: "I'm already using Claude Code for everything. What if it could just... pick these up and do them while I'm on dad duty?"
 
-Then it hit me: Claude Code is right there. It can read issues. It can write code. It can commit. What if I just... pointed it at my issue tracker and went to bed?
+I'd been using [ralph-claude-code](https://github.com/frankbria/ralph-claude-code) by Frank Bria and loved the concept - label an issue, let AI work it. But I kept bumping into walls. One repo only. No parallel processing. I wanted to label three issues across two projects before the baby's next nap and come back to three PRs.
 
-Three sleepless nights later (ironic, I know), ralph-gh was born. Named after the intern archetype — eager, tireless, occasionally needs supervision, but genuinely gets stuff done. Unlike a real intern, Ralph doesn't need coffee breaks, doesn't ask if the standup could've been a Slack message, and won't ghost you after two weeks for a better offer.
+So I forked it. Then I rewrote most of it. Then I rewrote it again because the baby woke up and I lost my train of thought mid-refactor.
 
-He just labels, branches, codes, commits, and PRs. Every. Single. Time.
+The result is ralph-gh - named after the intern archetype. Eager, tireless, occasionally needs supervision, but genuinely gets stuff done. Unlike a real intern, Ralph doesn't need coffee breaks, doesn't ask if the standup could've been a Slack message, and won't ghost you after two weeks for a better offer. Unlike a newborn, he sleeps when you tell him to.
 
-Is it perfect? No. Will Ralph occasionally open a PR that makes you question the nature of consciousness? Yes. But he'll do it at 3 AM while you're asleep, and honestly, that's more than most of us can say.
+He just branches, codes, commits, and PRs. Every. Single. Time.
+
+Is it perfect? No. Will Ralph occasionally open a PR that makes you question the nature of consciousness? Yes. But he'll do it at 3 AM while you're up anyway, and that's more than most developers can say about their side projects.
 
 ## How it works
 
