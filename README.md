@@ -14,7 +14,7 @@
 
 ralph-gh is a CLI tool that processes your GitHub issues. Label issues `ralph`, run `ralph-gh run`, and it picks them up, spins up [Claude Code](https://docs.anthropic.com/en/docs/claude-code), writes the code, and opens a PR for each one.
 
-It handles **standalone issues** (single tasks) and **parent issues with sub-task checklists** (sequential multi-step work on a single branch).
+It handles **standalone issues** (single tasks) and **parent issues with sub-task checklists** (sequential multi-step work on a single branch). Need to work on multiple issues at once? Target specific issues and run them in parallel — each gets its own isolated git worktree.
 
 ## How it works
 
@@ -141,13 +141,29 @@ ralph-gh respects the same config files as [ralph-claude-code](https://github.co
 ## CLI
 
 ```bash
-ralph-gh run              # Process all labeled issues and exit
+ralph-gh run              # Process all labeled issues sequentially
+ralph-gh run 42           # Work on issue #42 in an isolated worktree
+ralph-gh run 42 99        # Work on #42 then #99 (sequential, each in its own worktree)
 ralph-gh run --label foo  # Override label for this run
 ralph-gh --status         # What's it doing right now?
 ralph-gh --kill           # Kill running instance and all child processes
 ralph-gh --reset          # Clear state + circuit breaker
 ralph-gh --help           # Show help
 ```
+
+### Parallel processing
+
+Target specific issues and run multiple instances simultaneously — each gets its own git worktree so there are no branch conflicts:
+
+```bash
+# Terminal 1
+ralph-gh run 42
+
+# Terminal 2
+ralph-gh run 99
+```
+
+Each worker creates an isolated worktree at `.ralph-workers/issue-<N>/`, processes the issue, opens a PR, and cleans up after itself. Per-issue locks prevent accidentally running two workers on the same issue.
 
 ## Safety
 
@@ -170,6 +186,7 @@ ralph-gh.sh                          Entry point: find labeled issues, process a
   +-- lib/branch_manager.sh          Git branch/commit/push/PR operations
   +-- lib/state_manager.sh           JSON state: what's in progress, what's done
   +-- lib/circuit_breaker.sh         Detects when Claude is spinning its wheels
+  +-- lib/worktree_manager.sh        Git worktree isolation for parallel workers
   +-- lib/utils.sh                   Logging, cross-platform timeout
   +-- lib/date_utils.sh              Date helpers that work on both Linux and macOS
 ```
