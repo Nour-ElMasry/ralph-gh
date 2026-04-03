@@ -231,5 +231,137 @@ clear_saved_session() {
     rm -f "$RALPH_GH_STATE_DIR/.claude_session_id"
 }
 
+# Build the review prompt for post-completion /review pass
+build_review_prompt() {
+    local workspace=$1
+    local main_branch=$2
+    local parent_issue_number=$3
+
+    local prompt=""
+
+    # Check for project-specific prompt
+    if [[ -f "$workspace/.ralph/PROMPT.md" ]]; then
+        prompt=$(cat "$workspace/.ralph/PROMPT.md")
+        prompt+=$'\n\n---\n\n'
+    fi
+
+    # Add AGENT.md build instructions if available
+    if [[ -f "$workspace/.ralph/AGENT.md" ]]; then
+        prompt+="## Build & Run Instructions"
+        prompt+=$'\n\n'
+        prompt+=$(cat "$workspace/.ralph/AGENT.md")
+        prompt+=$'\n\n'
+    fi
+
+    prompt+="## Task: Pre-PR Review"
+    prompt+=$'\n\n'
+    prompt+="You are reviewing the complete diff of branch work for parent issue #${parent_issue_number} before a PR is opened."
+    prompt+=$'\n\n'
+    prompt+="Run \`/review\` to analyze all changes on this branch compared to \`${main_branch}\`."
+    prompt+=$'\n\n'
+    prompt+="If the review surfaces issues, fix them and commit with conventional commit messages."
+    prompt+=$'\n'
+    prompt+="If no issues are found, report COMPLETE."
+    prompt+=$'\n\n'
+
+    # Add rules
+    prompt+=$(cat <<'RULES'
+## Rules
+1. Run /review first — do not skip it
+2. Fix any issues the review identifies
+3. Commit fixes with descriptive conventional commit messages (e.g. fix: ...)
+4. Do NOT close issues or open PRs - that is handled externally
+5. Do NOT modify .ralph-gh/ or .ralph/ state files
+
+## Status Report (REQUIRED - end of every response)
+
+```
+---RALPH_STATUS---
+STATUS: IN_PROGRESS | COMPLETE | BLOCKED
+FILES_MODIFIED: <number>
+TESTS_STATUS: PASSING | FAILING | NOT_RUN
+EXIT_SIGNAL: false | true
+RECOMMENDATION: <one line>
+---END_RALPH_STATUS---
+```
+RULES
+)
+
+    echo "$prompt"
+}
+
+# Execute a /review pass against the current branch before PR creation
+# Returns: 0=success (review done, fixes applied if any), 1=failure
+execute_review() {
+    local workspace=$1
+    local repo=$2
+    local main_branch=$3
+    local parent_issue_number=$4
+    local allowed_tools=$5
+    local timeout_minutes=$6
+
+    local timeout_seconds=$((timeout_minutes * 60))
+
+    log_status "INFO" "Running pre-PR /review for parent #$parent_issue_number..."
+
+    # Build the review prompt
+    local prompt
+    prompt=$(build_review_prompt "$workspace" "$main_branch" "$parent_issue_number")
+
+    # Build Claude CLI command
+    local -a cmd_args=("claude")
+    cmd_args+=("--output-format" "json")
+
+    # Add allowed tools
+    if [[ -n "$allowed_tools" ]]; then
+        cmd_args+=("--allowedTools")
+        local IFS=','
+        read -ra tools_array <<< "$allowed_tools"
+        for tool in "${tools_array[@]}"; do
+            tool=$(echo "$tool" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            if [[ -n "$tool" ]]; then
+                cmd_args+=("$tool")
+            fi
+        done
+    fi
+
+    # Add the prompt
+    cmd_args+=("-p" "$prompt")
+
+    # Execute with timeout
+    local output_file="$RALPH_GH_STATE_DIR/logs/claude_review_$(date '+%Y%m%d_%H%M%S').log"
+    mkdir -p "$(dirname "$output_file")"
+
+    log_status "INFO" "Invoking Claude Code for review (timeout: ${timeout_minutes}m)..."
+
+    local exit_code=0
+    portable_timeout "${timeout_seconds}s" "${cmd_args[@]}" \
+        < /dev/null > "$output_file" 2>/dev/null
+    exit_code=$?
+
+    if [[ $exit_code -eq 124 ]]; then
+        log_status "WARN" "Review timed out after ${timeout_minutes} minutes"
+        return 1
+    fi
+
+    if [[ $exit_code -ne 0 ]]; then
+        log_status "ERROR" "Review Claude invocation exited with code $exit_code"
+        return 1
+    fi
+
+    # Commit any review fixes
+    if ! git diff --quiet HEAD 2>/dev/null || ! git diff --cached --quiet 2>/dev/null || \
+       [[ -n "$(git ls-files --others --exclude-standard 2>/dev/null)" ]]; then
+        git add -A -- ':!.ralph-gh' 2>/dev/null || true
+        git commit -m "fix(ralph): address review findings for #$parent_issue_number" 2>/dev/null || true
+        log_status "SUCCESS" "Review fixes committed"
+    else
+        log_status "INFO" "Review complete — no fixes needed"
+    fi
+
+    return 0
+}
+
 export -f build_full_prompt execute_for_sub_issue
+export -f build_review_prompt execute_review
 export -f get_saved_session_id clear_saved_session

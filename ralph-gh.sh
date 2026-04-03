@@ -259,7 +259,19 @@ process_parent_group() {
         done
     done
 
-    # All sub-issues completed successfully
+    # All sub-issues completed — run /review before opening PR
+    log_status "INFO" "All sub-issues done. Running pre-PR review..."
+    clear_saved_session
+    if ! execute_review \
+        "$RALPH_GH_WORKSPACE" \
+        "$RALPH_GH_REPO" \
+        "$RALPH_GH_MAIN_BRANCH" \
+        "$parent_number" \
+        "$RALPH_GH_ALLOWED_TOOLS" \
+        "$CLAUDE_TIMEOUT_MINUTES"; then
+        log_status "WARN" "Pre-PR review failed or timed out — proceeding with PR anyway"
+    fi
+
     complete_group "$parent_number" "$branch_name"
     return 0
 }
