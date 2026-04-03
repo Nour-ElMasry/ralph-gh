@@ -272,6 +272,31 @@ process_parent_group() {
         log_status "WARN" "Pre-PR review failed or timed out — proceeding with PR anyway"
     fi
 
+    # Create changeset summarizing all work
+    log_status "INFO" "Creating changeset for parent #$parent_number..."
+    local completed_subs_for_changeset
+    completed_subs_for_changeset=$(get_completed_subs)
+    local subs_summary=""
+    while IFS= read -r sub; do
+        [[ -z "$sub" ]] && continue
+        local title
+        title=$(get_issue_title "$RALPH_GH_REPO" "$sub") || title=""
+        [[ -z "$title" ]] && title="Sub-issue $sub"
+        subs_summary+="#${sub} - ${title}"$'\n'
+    done <<< "$completed_subs_for_changeset"
+
+    clear_saved_session
+    if ! execute_changeset \
+        "$RALPH_GH_WORKSPACE" \
+        "$RALPH_GH_REPO" \
+        "$RALPH_GH_MAIN_BRANCH" \
+        "$parent_number" \
+        "$subs_summary" \
+        "$RALPH_GH_ALLOWED_TOOLS" \
+        "$CLAUDE_TIMEOUT_MINUTES"; then
+        log_status "WARN" "Changeset creation failed — proceeding with PR anyway"
+    fi
+
     complete_group "$parent_number" "$branch_name"
     return 0
 }

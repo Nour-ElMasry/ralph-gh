@@ -46,6 +46,7 @@ build_full_prompt() {
 3. Commit with descriptive conventional commit messages
 4. Do NOT close issues or open PRs - that is handled externally
 5. Do NOT modify .ralph-gh/ or .ralph/ state files
+6. Do NOT run `pnpm changeset` - changesets are handled after all sub-issues complete
 
 ## Status Report (REQUIRED - end of every response)
 
@@ -362,6 +363,110 @@ execute_review() {
     return 0
 }
 
+# Build a prompt for changeset creation
+build_changeset_prompt() {
+    local workspace=$1
+    local main_branch=$2
+    local parent_issue_number=$3
+    local subs_summary=$4
+
+    local parent_title
+    parent_title=$(get_issue_title "$RALPH_GH_REPO" "$parent_issue_number") || parent_title=""
+    [[ -z "$parent_title" ]] && parent_title="Issue $parent_issue_number"
+
+    cat <<CHANGESET_EOF
+You are creating a changeset for a completed group of work.
+
+## Parent Issue: #${parent_issue_number} - ${parent_title}
+
+## Completed sub-issues:
+${subs_summary}
+
+## Instructions
+1. Review the git diff against main to understand all changes: \`git diff ${main_branch}...HEAD\`
+2. Run \`pnpm changeset\` to create a changeset file that summarizes the overall feature/fix
+3. Create ONE changeset that covers the entire body of work (not one per sub-issue)
+4. After creating the changeset, stage and commit it with: \`git add .changeset && git commit -m "chore: add changeset for #${parent_issue_number}"\`
+5. Do NOT close issues or open PRs
+
+## Status Report (REQUIRED)
+
+\`\`\`
+---RALPH_STATUS---
+STATUS: COMPLETE
+FILES_MODIFIED: 1
+TESTS_STATUS: NOT_RUN
+EXIT_SIGNAL: false
+RECOMMENDATION: Changeset created
+---END_RALPH_STATUS---
+\`\`\`
+CHANGESET_EOF
+}
+
+# Execute Claude Code to create a changeset after all sub-issues complete
+execute_changeset() {
+    local workspace=$1
+    local repo=$2
+    local main_branch=$3
+    local parent_issue_number=$4
+    local subs_summary=$5
+    local allowed_tools=$6
+    local timeout_minutes=$7
+
+    local timeout_seconds=$((timeout_minutes * 60))
+
+    log_status "INFO" "Creating changeset for parent #$parent_issue_number..."
+
+    # Build the changeset prompt
+    local prompt
+    prompt=$(build_changeset_prompt "$workspace" "$main_branch" "$parent_issue_number" "$subs_summary")
+
+    # Build Claude CLI command
+    local -a cmd_args=("claude")
+    cmd_args+=("--output-format" "json")
+
+    # Add allowed tools
+    if [[ -n "$allowed_tools" ]]; then
+        cmd_args+=("--allowedTools")
+        local IFS=','
+        read -ra tools_array <<< "$allowed_tools"
+        for tool in "${tools_array[@]}"; do
+            tool=$(echo "$tool" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            if [[ -n "$tool" ]]; then
+                cmd_args+=("$tool")
+            fi
+        done
+    fi
+
+    # Add the prompt
+    cmd_args+=("-p" "$prompt")
+
+    # Execute with timeout
+    local output_file="$RALPH_GH_STATE_DIR/logs/claude_changeset_$(date '+%Y%m%d_%H%M%S').log"
+    mkdir -p "$(dirname "$output_file")"
+
+    log_status "INFO" "Invoking Claude Code for changeset (timeout: ${timeout_minutes}m)..."
+
+    local exit_code=0
+    portable_timeout "${timeout_seconds}s" "${cmd_args[@]}" \
+        < /dev/null > "$output_file" 2>/dev/null
+    exit_code=$?
+
+    if [[ $exit_code -eq 124 ]]; then
+        log_status "WARN" "Changeset creation timed out after ${timeout_minutes} minutes"
+        return 1
+    fi
+
+    if [[ $exit_code -ne 0 ]]; then
+        log_status "ERROR" "Changeset Claude invocation exited with code $exit_code"
+        return 1
+    fi
+
+    log_status "SUCCESS" "Changeset created for parent #$parent_issue_number"
+    return 0
+}
+
 export -f build_full_prompt execute_for_sub_issue
 export -f build_review_prompt execute_review
+export -f build_changeset_prompt execute_changeset
 export -f get_saved_session_id clear_saved_session
