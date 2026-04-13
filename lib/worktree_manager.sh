@@ -49,9 +49,12 @@ worktree_setup() {
         _worktree_create "$worktree_dir" "$branch_name" "$main_branch"
     fi
 
-    # Redirect all state globals to the worktree
+    # Redirect state globals to an EXTERNAL directory (outside the worktree).
+    # Keeping state inside the worktree meant Claude could wipe it by running
+    # `git clean -fdx`, `pnpm clean`, or similar during a sub-issue — causing
+    # mark_sub_complete and get_remaining_subs to silently return empty state.
     RALPH_GH_WORKSPACE="$worktree_dir"
-    RALPH_GH_STATE_DIR="$worktree_dir/.ralph-gh"
+    RALPH_GH_STATE_DIR="$HOME/.ralph-gh/runs/issue-${issue_number}"
     STATE_DIR="$RALPH_GH_STATE_DIR"
     STATE_FILE="$RALPH_GH_STATE_DIR/state.json"
     CB_STATE_FILE="$RALPH_GH_STATE_DIR/.circuit_breaker_state"
@@ -59,7 +62,7 @@ worktree_setup() {
     mkdir -p "$LOG_DIR"
 
     cd "$worktree_dir"
-    log_status "SUCCESS" "Worktree ready at $worktree_dir"
+    log_status "SUCCESS" "Worktree ready at $worktree_dir (state at $RALPH_GH_STATE_DIR)"
     return 0
 }
 
@@ -90,6 +93,7 @@ worktree_cleanup() {
     local issue_number=$1
 
     local worktree_dir="$WORKTREE_BASE/issue-${issue_number}"
+    local state_dir="$HOME/.ralph-gh/runs/issue-${issue_number}"
 
     # Return to main workspace
     cd "$_RALPH_MAIN_WORKSPACE" 2>/dev/null || cd "$HOME"
@@ -98,6 +102,12 @@ worktree_cleanup() {
     if [[ -d "$worktree_dir" ]]; then
         log_status "INFO" "Cleaning up worktree at $worktree_dir"
         git -C "$_RALPH_MAIN_WORKSPACE" worktree remove "$worktree_dir" --force 2>/dev/null || rm -rf "$worktree_dir"
+    fi
+
+    # Remove the external state dir for this issue (logs + state.json)
+    if [[ -d "$state_dir" ]]; then
+        log_status "INFO" "Cleaning up state dir at $state_dir"
+        rm -rf "$state_dir"
     fi
 
     # Release per-issue lock
