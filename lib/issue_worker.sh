@@ -312,112 +312,6 @@ run_acceptance_gate() {
     return 0
 }
 
-# Build a small, focused prompt for the per-sub /review gate.
-# The reviewer is told to list findings only, NOT fix them — bash uses the list
-# as retry_context for the next sub-issue iteration, so the fix happens in the
-# main implementation call (with full skill access).
-build_per_sub_review_prompt() {
-    local workspace=$1
-    local sub_issue_number=$2
-    local sub_start_ref=$3
-
-    local prompt=""
-    prompt+="## Task: Per-sub-issue code review"$'\n\n'
-    prompt+="Run \`/review\` on the diff for sub-issue #${sub_issue_number}: \`git diff ${sub_start_ref}\`."$'\n\n'
-    prompt+="Review scope is ONLY the changes since ${sub_start_ref} — do not review the whole branch or unrelated files."$'\n\n'
-    prompt+="**Rules:**"$'\n'
-    prompt+="1. Run \`/review\` first, scoped to \`git diff ${sub_start_ref}\`."$'\n'
-    prompt+="2. Do NOT fix any issues — only list them."$'\n'
-    prompt+="3. If the review finds any issues (SQL safety, trust boundary, structural, duplication, wrong pattern, missing tests), list them clearly under a \`## FINDINGS\` heading in your final message."$'\n'
-    prompt+="4. If the review is clean, write a single line: \`FINDINGS: none\` and nothing else under a FINDINGS heading."$'\n'
-    prompt+="5. Do NOT run tests, do NOT build, do NOT commit, do NOT modify files."$'\n\n'
-    prompt+=$(cat <<'RULES'
-## Status Report (REQUIRED)
-
-```
----RALPH_STATUS---
-STATUS: COMPLETE
-FILES_MODIFIED: 0
-TESTS_STATUS: NOT_RUN
-EXIT_SIGNAL: false
-RECOMMENDATION: <one line>
----END_RALPH_STATUS---
-```
-RULES
-)
-    echo "$prompt"
-}
-
-# Invoke Claude for a per-sub-issue /review pass.
-# Echoes findings text on stdout. Returns: 0 if clean, 1 if findings or error.
-run_per_sub_review() {
-    local workspace=$1
-    local sub_issue_number=$2
-    local allowed_tools=$3
-    local timeout_minutes=${4:-8}
-    local sub_start_ref=$5
-
-    local timeout_seconds=$((timeout_minutes * 60))
-    log_status "INFO" "Running per-sub /review for #$sub_issue_number (diff vs ${sub_start_ref:0:8})..."
-
-    local prompt
-    prompt=$(build_per_sub_review_prompt "$workspace" "$sub_issue_number" "$sub_start_ref")
-
-    local -a cmd_args=("claude" "--output-format" "json")
-    if [[ -n "$allowed_tools" ]]; then
-        cmd_args+=("--allowedTools")
-        local IFS=','
-        read -ra tools_array <<< "$allowed_tools"
-        for tool in "${tools_array[@]}"; do
-            tool=$(echo "$tool" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-            [[ -n "$tool" ]] && cmd_args+=("$tool")
-        done
-    fi
-    cmd_args+=("-p" "$prompt")
-
-    local output_file="$RALPH_GH_STATE_DIR/logs/claude_per_sub_review_$(date '+%Y%m%d_%H%M%S').log"
-    mkdir -p "$(dirname "$output_file")"
-
-    local exit_code=0
-    portable_timeout "${timeout_seconds}s" "${cmd_args[@]}" \
-        < /dev/null > "$output_file" 2>/dev/null
-    exit_code=$?
-
-    if [[ $exit_code -ne 0 ]]; then
-        echo "Per-sub review invocation failed (exit $exit_code). Skipping gate (treated as clean)."
-        return 0
-    fi
-
-    local result_text
-    if jq -e 'type == "array"' "$output_file" > /dev/null 2>&1; then
-        result_text=$(jq -r '[.[] | select(.type == "result")] | .[-1].result // ""' "$output_file" 2>/dev/null)
-    else
-        result_text=$(jq -r '.result // ""' "$output_file" 2>/dev/null)
-    fi
-
-    # Clean result: "FINDINGS: none" → clean
-    if echo "$result_text" | grep -qi 'FINDINGS:\s*none'; then
-        log_status "SUCCESS" "Per-sub review clean for #$sub_issue_number"
-        return 0
-    fi
-
-    # Extract FINDINGS section
-    local findings
-    findings=$(echo "$result_text" | awk '
-        /^## *FINDINGS/ { capture=1; next }
-        /^## / && capture { capture=0 }
-        capture { print }
-    ')
-
-    if [[ -z "$findings" ]]; then
-        log_status "INFO" "Per-sub review: no FINDINGS section found, treating as clean"
-        return 0
-    fi
-
-    echo "$findings"
-    return 1
-}
-
 # Build the review prompt for post-completion /review pass
 build_review_prompt() {
     local workspace=$1
@@ -440,25 +334,26 @@ build_review_prompt() {
         prompt+=$'\n\n'
     fi
 
-    prompt+="## Task: Pre-PR Review"
+    prompt+="## Task: Pre-PR Review (Best Practices Audit)"
     prompt+=$'\n\n'
     prompt+="You are reviewing the complete diff of branch work for parent issue #${parent_issue_number} before a PR is opened."
     prompt+=$'\n\n'
-    prompt+="Run \`/review\` to analyze all changes on this branch compared to \`${main_branch}\`."
+    prompt+="Run \`/review-best-practices\` to analyze all changes on this branch compared to \`${main_branch}\`. This is a superset of \`/review\` — it runs the standard pre-landing review first (SQL safety, trust boundaries, race conditions, test coverage) then layers on a best-practices audit (SOLID, DRY, KISS, YAGNI, clean code)."
     prompt+=$'\n\n'
-    prompt+="If the review surfaces issues, fix them and commit with conventional commit messages."
+    prompt+="If the audit surfaces issues, fix the critical and best-practices findings and commit with conventional commit messages."
     prompt+=$'\n'
-    prompt+="If no issues are found, report COMPLETE."
+    prompt+="If no issues are found, report COMPLETE without making any changes."
     prompt+=$'\n\n'
 
     # Add rules
     prompt+=$(cat <<'RULES'
 ## Rules
-1. Run /review first — do not skip it
-2. Fix any issues the review identifies
-3. Commit fixes with descriptive conventional commit messages (e.g. fix: ...)
+1. Run /review-best-practices first — do not skip it
+2. Fix critical (from /review) and best-practices findings
+3. Commit fixes with descriptive conventional commit messages (e.g. fix: ..., refactor: ...)
 4. Do NOT close issues or open PRs - that is handled externally
 5. Do NOT modify .ralph-gh/ or .ralph/ state files
+6. If the audit is clean (no findings), do NOT make any file changes — report COMPLETE
 
 ## Status Report (REQUIRED - end of every response)
 
@@ -701,5 +596,5 @@ export -f build_full_prompt execute_for_sub_issue
 export -f build_review_prompt execute_review
 export -f build_changeset_prompt execute_changeset
 export -f get_saved_session_id clear_saved_session
-export -f run_acceptance_gate run_per_sub_review build_per_sub_review_prompt
+export -f run_acceptance_gate
 export -f run_e2e_pre_check

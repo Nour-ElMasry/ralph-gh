@@ -29,9 +29,9 @@ CLAUDE_TIMEOUT_MINUTES="${CLAUDE_TIMEOUT_MINUTES:-15}"
 RALPH_GH_ALLOWED_TOOLS="${RALPH_GH_ALLOWED_TOOLS:-Write,Read,Edit,Bash(git add *),Bash(git commit *),Bash(git diff *),Bash(git log *),Bash(git status),Bash(git status *),Bash(git push *),Bash(git pull *),Bash(git fetch *),Bash(git checkout *),Bash(git branch *),Bash(git stash *),Bash(git merge *),Bash(git tag *),Bash(npm *),Bash(pnpm *),Bash(node *),Bash(find *)}"
 CB_NO_PROGRESS_THRESHOLD="${CB_NO_PROGRESS_THRESHOLD:-3}"
 CB_SAME_ERROR_THRESHOLD="${CB_SAME_ERROR_THRESHOLD:-5}"
-RALPH_GH_MAX_LOOPS_PER_ISSUE="${RALPH_GH_MAX_LOOPS_PER_ISSUE:-8}"  # Max Claude invocations per sub-issue (includes gate retries)
+RALPH_GH_MAX_LOOPS_PER_ISSUE="${RALPH_GH_MAX_LOOPS_PER_ISSUE:-8}"  # Max Claude invocations per sub-issue (includes acceptance-gate retries)
 RALPH_GH_MAX_LOOPS_TOTAL="${RALPH_GH_MAX_LOOPS_TOTAL:-0}"          # Max total invocations per parent group (0=unlimited)
-RALPH_GH_MAX_REVIEW_RETRIES="${RALPH_GH_MAX_REVIEW_RETRIES:-2}"    # Max /review fix cycles per sub-issue (each one = 1 review + 1 impl call)
+RALPH_GH_MAX_REVIEW_RUNS="${RALPH_GH_MAX_REVIEW_RUNS:-2}"          # Max end-of-group /review-best-practices runs before opening PR
 
 # =============================================================================
 # REPO AUTO-DETECTION
@@ -195,9 +195,10 @@ process_parent_group() {
         # Export so the repo-level Stop hook can scope its test-gate to the sub-issue diff
         export RALPH_SUB_START_REF="$sub_start_ref"
 
-        # Loop per sub-issue: re-invoke Claude until all gates pass or limit hit
+        # Loop per sub-issue: re-invoke Claude until the acceptance gate passes
+        # or max loops is hit. The /review-best-practices pass runs once at the
+        # end of the whole parent group, not per sub-issue.
         local loop_count=0
-        local review_retry_count=0
         local sub_done=false
         local retry_context=""
 
@@ -259,7 +260,10 @@ process_parent_group() {
                 continue
             fi
 
-            # Gate 1: acceptance criteria (parse ACCEPTANCE block from Claude output)
+            # Acceptance gate: parse ACCEPTANCE block from Claude output.
+            # Cheap (no Claude call) and the only per-sub-issue quality gate.
+            # The /review-best-practices pass runs once at the end of the whole
+            # parent group, not per sub-issue, to keep Claude costs bounded.
             local acceptance_failures
             if ! acceptance_failures=$(run_acceptance_gate 2>&1); then
                 log_status "WARN" "Sub-issue #$sub_number: ACCEPTANCE gate failed"
@@ -267,44 +271,14 @@ process_parent_group() {
                 retry_context="ACCEPTANCE GATE FAILED. The following criteria are not yet met — address each one and re-report the ACCEPTANCE block with them checked. Evidence (file:line or test name) is required for each [X]."$'\n\n'"$acceptance_failures"
                 # Gate failure after a successful Claude invocation = progress with errors.
                 # Claude did real work (execute_for_sub_issue would have returned non-zero
-                # otherwise); the gate just found issues in it. Don't count this as
-                # "no progress" — use has_progress=true so the CB's no-progress counter
-                # resets and the same-error counter (threshold 5) becomes the soft ceiling,
-                # while RALPH_GH_MAX_LOOPS_PER_ISSUE stays the hard ceiling.
+                # otherwise); the gate just found issues in it. has_progress=true so the
+                # CB's no-progress counter resets; same-error counter becomes the soft
+                # ceiling while RALPH_GH_MAX_LOOPS_PER_ISSUE stays the hard ceiling.
                 record_result "true" "true"
                 continue
             fi
 
-            # Gate 2: per-sub /review against the sub-issue start ref (list-only, no fixes).
-            # Capped by RALPH_GH_MAX_REVIEW_RETRIES — after the cap, the findings are
-            # logged and the sub-issue is accepted. This prevents an expensive
-            # review → fix → review loop from eating the whole Claude budget on
-            # findings Claude can't converge on. Max loops remains the hard ceiling.
-            local review_findings
-            if ! review_findings=$(run_per_sub_review \
-                "$RALPH_GH_WORKSPACE" \
-                "$sub_number" \
-                "$RALPH_GH_ALLOWED_TOOLS" \
-                8 \
-                "$sub_start_ref"); then
-                if [[ $review_retry_count -ge $RALPH_GH_MAX_REVIEW_RETRIES ]]; then
-                    log_status "WARN" "Sub-issue #$sub_number: REVIEW gate still has findings after $review_retry_count retry(s), accepting sub-issue anyway"
-                    log_status "WARN" "Unresolved findings (will need human follow-up):"$'\n'"$review_findings"
-                    # Persist findings so they can be surfaced on the PR later
-                    mkdir -p "$RALPH_GH_STATE_DIR/unresolved_findings"
-                    echo "## Sub-issue #$sub_number — unresolved review findings"$'\n\n'"$review_findings" \
-                        > "$RALPH_GH_STATE_DIR/unresolved_findings/sub_${sub_number}.md"
-                    # Fall through to success path
-                else
-                    review_retry_count=$((review_retry_count + 1))
-                    log_status "WARN" "Sub-issue #$sub_number: REVIEW gate found issues (retry $review_retry_count/$RALPH_GH_MAX_REVIEW_RETRIES)"
-                    retry_context="REVIEW GATE FAILED. A /review pass on your sub-issue diff surfaced the following findings — fix them and ensure the ACCEPTANCE block still reports all criteria as [X]:"$'\n\n'"$review_findings"
-                    record_result "true" "true"
-                    continue
-                fi
-            fi
-
-            # All gates passed — commit any remaining uncommitted work
+            # Acceptance gate passed — commit any remaining uncommitted work
             local sub_title
             sub_title=$(get_issue_title "$RALPH_GH_REPO" "$sub_number" < /dev/null) || sub_title=""
             [[ -z "$sub_title" ]] && sub_title="Sub-issue $sub_number"
@@ -320,18 +294,39 @@ process_parent_group() {
         done
     done
 
-    # All sub-issues completed — run /review before opening PR
-    log_status "INFO" "All sub-issues done. Running pre-PR review..."
-    clear_saved_session
-    if ! execute_review \
-        "$RALPH_GH_WORKSPACE" \
-        "$RALPH_GH_REPO" \
-        "$RALPH_GH_MAIN_BRANCH" \
-        "$parent_number" \
-        "$RALPH_GH_ALLOWED_TOOLS" \
-        "$CLAUDE_TIMEOUT_MINUTES"; then
-        log_status "WARN" "Pre-PR review failed or timed out — proceeding with PR anyway"
-    fi
+    # All sub-issues completed — run /review-best-practices before opening PR.
+    # Loop up to RALPH_GH_MAX_REVIEW_RUNS times: each run invokes Claude which
+    # fixes what it can and commits. Exit early if a run produces zero git
+    # changes (meaning the branch is clean and no further passes are needed).
+    log_status "INFO" "All sub-issues done. Running pre-PR /review-best-practices (max $RALPH_GH_MAX_REVIEW_RUNS run(s))..."
+    local review_run=0
+    while [[ $review_run -lt $RALPH_GH_MAX_REVIEW_RUNS ]]; do
+        review_run=$((review_run + 1))
+        log_status "INFO" "Pre-PR review run $review_run/$RALPH_GH_MAX_REVIEW_RUNS"
+        clear_saved_session
+        local head_before
+        head_before=$(git rev-parse HEAD 2>/dev/null)
+
+        if ! execute_review \
+            "$RALPH_GH_WORKSPACE" \
+            "$RALPH_GH_REPO" \
+            "$RALPH_GH_MAIN_BRANCH" \
+            "$parent_number" \
+            "$RALPH_GH_ALLOWED_TOOLS" \
+            "$CLAUDE_TIMEOUT_MINUTES"; then
+            log_status "WARN" "Pre-PR review run $review_run failed or timed out"
+            break
+        fi
+
+        local head_after
+        head_after=$(git rev-parse HEAD 2>/dev/null)
+        if [[ "$head_before" == "$head_after" ]]; then
+            log_status "SUCCESS" "Pre-PR review run $review_run made no changes — branch is clean, skipping remaining runs"
+            break
+        fi
+
+        log_status "INFO" "Pre-PR review run $review_run committed fixes (HEAD ${head_before:0:8} -> ${head_after:0:8})"
+    done
 
     # Create changeset summarizing all work
     log_status "INFO" "Creating changeset for parent #$parent_number..."
