@@ -34,15 +34,51 @@ parse_completed_tasks() {
     echo "$body" | grep -oE '\- \[[xX]\] #[0-9]+' | grep -oE '#[0-9]+' | sed 's/#//'
 }
 
+# Wrap a gh call with retry + backoff to tolerate GitHub's secondary rate
+# limits (which kick in around 60 req/min on issue endpoints). Echoes stdout
+# on success, returns non-zero only after all attempts fail. Logs the last
+# stderr on persistent failure so the user can see what went wrong.
+gh_retry() {
+    local label=$1
+    shift
+    local attempts=3
+    local delays=(5 15 30)
+    local attempt=0
+    local output stderr_file rc
+
+    stderr_file=$(mktemp)
+    while (( attempt < attempts )); do
+        if output=$("$@" < /dev/null 2>"$stderr_file"); then
+            if [[ -n "$output" ]]; then
+                rm -f "$stderr_file"
+                echo "$output"
+                return 0
+            fi
+            # gh returned 0 but empty body — often means secondary rate limit.
+            # Fall through to retry.
+        fi
+        rc=$?
+        attempt=$((attempt + 1))
+        if (( attempt < attempts )); then
+            local delay=${delays[$((attempt - 1))]}
+            log_status "WARN" "gh call ($label) failed or empty (attempt $attempt/$attempts), sleeping ${delay}s before retry..."
+            sleep "$delay"
+        fi
+    done
+
+    log_status "ERROR" "gh call ($label) failed after $attempts attempts. Last stderr:"
+    tail -20 "$stderr_file" >&2 || true
+    rm -f "$stderr_file"
+    return 1
+}
+
 # Get just the title of an issue
 get_issue_title() {
     local repo=$1
     local issue_number=$2
 
-    gh issue view "$issue_number" \
-        --repo "$repo" \
-        --json title \
-        --jq '.title' < /dev/null 2>/dev/null
+    gh_retry "issue-title-$issue_number" \
+        gh issue view "$issue_number" --repo "$repo" --json title --jq '.title'
 }
 
 # Get just the body of an issue
@@ -50,10 +86,8 @@ get_issue_body() {
     local repo=$1
     local issue_number=$2
 
-    gh issue view "$issue_number" \
-        --repo "$repo" \
-        --json body \
-        --jq '.body' < /dev/null 2>/dev/null
+    gh_retry "issue-body-$issue_number" \
+        gh issue view "$issue_number" --repo "$repo" --json body --jq '.body'
 }
 
 # Close a sub-issue with a comment
@@ -196,6 +230,6 @@ fetch_issue_details() {
 }
 
 export -f poll_for_parent_issues parse_task_list parse_completed_tasks
-export -f get_issue_title get_issue_body fetch_issue_details
+export -f get_issue_title get_issue_body fetch_issue_details gh_retry
 export -f close_sub_issue check_off_sub_issue remove_label comment_on_issue
 export -f check_github_available validate_sub_issues

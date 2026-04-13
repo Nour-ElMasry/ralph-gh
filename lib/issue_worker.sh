@@ -111,6 +111,16 @@ execute_for_sub_issue() {
         return 1
     fi
 
+    # Record whether the issue body contains any checklist markers (- [ ] or
+    # - [x]). If it doesn't, the sub-issue has no explicit acceptance criteria
+    # and run_acceptance_gate will auto-skip to avoid bouncing Claude for a
+    # missing block it couldn't meaningfully populate.
+    if echo "$sub_body" | grep -qE '^\s*-\s*\[[xX ]\]'; then
+        echo "true" > "$RALPH_GH_STATE_DIR/.last_sub_has_criteria"
+    else
+        echo "false" > "$RALPH_GH_STATE_DIR/.last_sub_has_criteria"
+    fi
+
     # Fetch parent title
     local parent_title
     parent_title=$(get_issue_title "$repo" "$parent_issue_number") || parent_title=""
@@ -162,15 +172,20 @@ execute_for_sub_issue() {
     # Add the prompt
     cmd_args+=("-p" "$prompt")
 
-    # Execute with timeout
-    local output_file="$RALPH_GH_STATE_DIR/logs/claude_output_$(date '+%Y%m%d_%H%M%S').log"
+    # Execute with timeout. Capture stderr to a sibling file so we can diagnose
+    # exit-code-1 failures (rate limits, quota, session errors, etc.) instead
+    # of silently throwing them away.
+    local stamp
+    stamp=$(date '+%Y%m%d_%H%M%S')
+    local output_file="$RALPH_GH_STATE_DIR/logs/claude_output_${stamp}.log"
+    local stderr_file="$RALPH_GH_STATE_DIR/logs/claude_output_${stamp}.stderr.log"
     mkdir -p "$(dirname "$output_file")"
 
     log_status "INFO" "Invoking Claude Code (timeout: ${timeout_minutes}m)..."
 
     local exit_code=0
     portable_timeout "${timeout_seconds}s" "${cmd_args[@]}" \
-        < /dev/null > "$output_file" 2>/dev/null
+        < /dev/null > "$output_file" 2>"$stderr_file"
     exit_code=$?
 
     # Save path for downstream gate functions (run_acceptance_gate reads this)
@@ -178,11 +193,21 @@ execute_for_sub_issue() {
 
     if [[ $exit_code -eq 124 ]]; then
         log_status "WARN" "Claude Code timed out after ${timeout_minutes} minutes"
+        if [[ -s "$stderr_file" ]]; then
+            log_status "WARN" "Claude stderr (tail):"
+            tail -15 "$stderr_file" >&2 || true
+        fi
         return 1
     fi
 
     if [[ $exit_code -ne 0 ]]; then
         log_status "ERROR" "Claude Code exited with code $exit_code"
+        if [[ -s "$stderr_file" ]]; then
+            log_status "ERROR" "Claude stderr (tail — full log at $stderr_file):"
+            tail -15 "$stderr_file" >&2 || true
+        else
+            log_status "ERROR" "Claude stderr was empty"
+        fi
         return 1
     fi
 
@@ -265,8 +290,16 @@ clear_saved_session() {
 
 # Parse the ACCEPTANCE block from the last Claude output log.
 # Echoes unchecked criteria (one per line) on stdout.
-# Returns: 0 if all criteria checked, 1 if any unchecked OR no block found.
+# Returns: 0 if all criteria checked (or sub-issue has no criteria), 1 if any unchecked OR no block found.
 run_acceptance_gate() {
+    # Auto-skip when the sub-issue body has no checklist markers. Gate is
+    # enforced whenever there ARE criteria; skipped when there aren't any.
+    local criteria_flag_file="$RALPH_GH_STATE_DIR/.last_sub_has_criteria"
+    if [[ -f "$criteria_flag_file" ]] && [[ "$(cat "$criteria_flag_file")" == "false" ]]; then
+        log_status "INFO" "Acceptance gate skipped: sub-issue has no checklist criteria in its body"
+        return 0
+    fi
+
     local path_file="$RALPH_GH_STATE_DIR/.last_claude_output_path"
     [[ -f "$path_file" ]] || { echo "no-output-file"; return 1; }
 
