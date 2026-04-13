@@ -29,7 +29,7 @@ CLAUDE_TIMEOUT_MINUTES="${CLAUDE_TIMEOUT_MINUTES:-15}"
 RALPH_GH_ALLOWED_TOOLS="${RALPH_GH_ALLOWED_TOOLS:-Write,Read,Edit,Bash(git add *),Bash(git commit *),Bash(git diff *),Bash(git log *),Bash(git status),Bash(git status *),Bash(git push *),Bash(git pull *),Bash(git fetch *),Bash(git checkout *),Bash(git branch *),Bash(git stash *),Bash(git merge *),Bash(git tag *),Bash(npm *),Bash(pnpm *),Bash(node *),Bash(find *)}"
 CB_NO_PROGRESS_THRESHOLD="${CB_NO_PROGRESS_THRESHOLD:-3}"
 CB_SAME_ERROR_THRESHOLD="${CB_SAME_ERROR_THRESHOLD:-5}"
-RALPH_GH_MAX_LOOPS_PER_ISSUE="${RALPH_GH_MAX_LOOPS_PER_ISSUE:-5}"  # Max Claude invocations per sub-issue
+RALPH_GH_MAX_LOOPS_PER_ISSUE="${RALPH_GH_MAX_LOOPS_PER_ISSUE:-8}"  # Max Claude invocations per sub-issue (includes gate retries)
 RALPH_GH_MAX_LOOPS_TOTAL="${RALPH_GH_MAX_LOOPS_TOTAL:-0}"          # Max total invocations per parent group (0=unlimited)
 
 # =============================================================================
@@ -147,6 +147,10 @@ process_parent_group() {
     log_status "INFO" "Processing parent issue #$parent_number on branch $branch_name"
     log_status "INFO" "Loops per sub-issue: $RALPH_GH_MAX_LOOPS_PER_ISSUE | Total limit: ${RALPH_GH_MAX_LOOPS_TOTAL:-unlimited}"
 
+    # Activate the repo-level Stop hook (enforced via env var to avoid blocking
+    # interactive Claude Code sessions in the same repo).
+    export RALPH_GH_ACTIVE=1
+
     local total_loops=0
 
     # Reset circuit breaker for this group
@@ -182,9 +186,18 @@ process_parent_group() {
         # Clear session from previous sub-issue (prevent context bleed)
         clear_saved_session
 
-        # Loop per sub-issue: re-invoke Claude until it reports COMPLETE or hits the limit
+        # Record the ref at the start of this sub-issue. All gates diff against
+        # this ref so the review/acceptance sees the full sub-issue change set,
+        # regardless of whether Claude made intermediate commits.
+        local sub_start_ref
+        sub_start_ref=$(git rev-parse HEAD 2>/dev/null)
+        # Export so the repo-level Stop hook can scope its test-gate to the sub-issue diff
+        export RALPH_SUB_START_REF="$sub_start_ref"
+
+        # Loop per sub-issue: re-invoke Claude until all gates pass or limit hit
         local loop_count=0
         local sub_done=false
+        local retry_context=""
 
         while [[ "$sub_done" == "false" ]]; do
             loop_count=$((loop_count + 1))
@@ -194,7 +207,7 @@ process_parent_group() {
             if [[ $loop_count -gt $RALPH_GH_MAX_LOOPS_PER_ISSUE ]]; then
                 log_status "ERROR" "Sub-issue #$sub_number hit max loops ($RALPH_GH_MAX_LOOPS_PER_ISSUE), stopping group"
                 abort_group "$parent_number" "$branch_name" \
-                    "Sub-issue #$sub_number exceeded max loops ($RALPH_GH_MAX_LOOPS_PER_ISSUE). Claude could not complete in time."
+                    "Sub-issue #$sub_number exceeded max loops ($RALPH_GH_MAX_LOOPS_PER_ISSUE). Last failure: ${retry_context:-unknown}"
                 return 1
             fi
 
@@ -219,7 +232,7 @@ process_parent_group() {
             local session_id
             session_id=$(get_saved_session_id)
 
-            # Execute Claude for this sub-issue
+            # Execute Claude for this sub-issue (passes retry_context from prior gate failures)
             local result=0
             execute_for_sub_issue \
                 "$RALPH_GH_WORKSPACE" \
@@ -228,34 +241,59 @@ process_parent_group() {
                 "$parent_number" \
                 "$session_id" \
                 "$RALPH_GH_ALLOWED_TOOLS" \
-                "$CLAUDE_TIMEOUT_MINUTES" || result=$?
+                "$CLAUDE_TIMEOUT_MINUTES" \
+                "$retry_context" || result=$?
 
-            if [[ $result -eq 0 ]]; then
-                # Success — commit changes and mark done
-                local sub_title
-                sub_title=$(get_issue_title "$RALPH_GH_REPO" "$sub_number" < /dev/null) || sub_title=""
-                [[ -z "$sub_title" ]] && sub_title="Sub-issue $sub_number"
-                commit_changes "$sub_number" "$sub_title" || \
-                    log_status "WARN" "commit_changes failed for #$sub_number, continuing"
-                mark_sub_complete "$sub_number"
-                check_off_sub_issue "$RALPH_GH_REPO" "$parent_number" "$sub_number" || true
-                record_result "true" "false" || true
-                log_status "SUCCESS" "Sub-issue #$sub_number completed in $loop_count loop(s)"
-                sub_done=true
-            else
-                # Failure — record and check circuit breaker
+            if [[ $result -ne 0 ]]; then
                 record_result "false" "true"
-
                 if ! can_execute; then
                     log_status "ERROR" "Circuit breaker tripped on sub-issue #$sub_number (loop $loop_count)"
                     abort_group "$parent_number" "$branch_name" \
                         "Circuit breaker opened while working on sub-issue #$sub_number (loop $loop_count)"
                     return 1
                 fi
-
-                # Still within limits — will retry on next iteration of while loop
-                log_status "WARN" "Sub-issue #$sub_number loop $loop_count failed, retrying..."
+                log_status "WARN" "Sub-issue #$sub_number loop $loop_count: Claude invocation failed, retrying..."
+                retry_context="Previous Claude invocation failed or produced no changes. Re-read the acceptance criteria and try again."
+                continue
             fi
+
+            # Gate 1: acceptance criteria (parse ACCEPTANCE block from Claude output)
+            local acceptance_failures
+            if ! acceptance_failures=$(run_acceptance_gate 2>&1); then
+                log_status "WARN" "Sub-issue #$sub_number: ACCEPTANCE gate failed"
+                log_status "WARN" "Unchecked criteria:"$'\n'"$acceptance_failures"
+                retry_context="ACCEPTANCE GATE FAILED. The following criteria are not yet met — address each one and re-report the ACCEPTANCE block with them checked. Evidence (file:line or test name) is required for each [X]."$'\n\n'"$acceptance_failures"
+                record_result "false" "true"
+                continue
+            fi
+
+            # Gate 2: per-sub /review against the sub-issue start ref (list-only, no fixes)
+            local review_findings
+            if ! review_findings=$(run_per_sub_review \
+                "$RALPH_GH_WORKSPACE" \
+                "$sub_number" \
+                "$RALPH_GH_ALLOWED_TOOLS" \
+                8 \
+                "$sub_start_ref"); then
+                log_status "WARN" "Sub-issue #$sub_number: REVIEW gate found issues"
+                retry_context="REVIEW GATE FAILED. A /review pass on your sub-issue diff surfaced the following findings — fix them and ensure the ACCEPTANCE block still reports all criteria as [X]:"$'\n\n'"$review_findings"
+                record_result "false" "true"
+                continue
+            fi
+
+            # All gates passed — commit any remaining uncommitted work
+            local sub_title
+            sub_title=$(get_issue_title "$RALPH_GH_REPO" "$sub_number" < /dev/null) || sub_title=""
+            [[ -z "$sub_title" ]] && sub_title="Sub-issue $sub_number"
+            commit_changes "$sub_number" "$sub_title" || \
+                log_status "WARN" "commit_changes failed for #$sub_number, continuing"
+
+            mark_sub_complete "$sub_number"
+            check_off_sub_issue "$RALPH_GH_REPO" "$parent_number" "$sub_number" || true
+            record_result "true" "false" || true
+            log_status "SUCCESS" "Sub-issue #$sub_number completed in $loop_count loop(s) (all gates green)"
+            sub_done=true
+            retry_context=""
         done
     done
 
