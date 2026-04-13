@@ -263,7 +263,13 @@ process_parent_group() {
                 log_status "WARN" "Sub-issue #$sub_number: ACCEPTANCE gate failed"
                 log_status "WARN" "Unchecked criteria:"$'\n'"$acceptance_failures"
                 retry_context="ACCEPTANCE GATE FAILED. The following criteria are not yet met — address each one and re-report the ACCEPTANCE block with them checked. Evidence (file:line or test name) is required for each [X]."$'\n\n'"$acceptance_failures"
-                record_result "false" "true"
+                # Gate failure after a successful Claude invocation = progress with errors.
+                # Claude did real work (execute_for_sub_issue would have returned non-zero
+                # otherwise); the gate just found issues in it. Don't count this as
+                # "no progress" — use has_progress=true so the CB's no-progress counter
+                # resets and the same-error counter (threshold 5) becomes the soft ceiling,
+                # while RALPH_GH_MAX_LOOPS_PER_ISSUE stays the hard ceiling.
+                record_result "true" "true"
                 continue
             fi
 
@@ -277,7 +283,7 @@ process_parent_group() {
                 "$sub_start_ref"); then
                 log_status "WARN" "Sub-issue #$sub_number: REVIEW gate found issues"
                 retry_context="REVIEW GATE FAILED. A /review pass on your sub-issue diff surfaced the following findings — fix them and ensure the ACCEPTANCE block still reports all criteria as [X]:"$'\n\n'"$review_findings"
-                record_result "false" "true"
+                record_result "true" "true"
                 continue
             fi
 
