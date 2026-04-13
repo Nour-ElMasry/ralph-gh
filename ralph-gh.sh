@@ -31,6 +31,7 @@ CB_NO_PROGRESS_THRESHOLD="${CB_NO_PROGRESS_THRESHOLD:-3}"
 CB_SAME_ERROR_THRESHOLD="${CB_SAME_ERROR_THRESHOLD:-5}"
 RALPH_GH_MAX_LOOPS_PER_ISSUE="${RALPH_GH_MAX_LOOPS_PER_ISSUE:-8}"  # Max Claude invocations per sub-issue (includes gate retries)
 RALPH_GH_MAX_LOOPS_TOTAL="${RALPH_GH_MAX_LOOPS_TOTAL:-0}"          # Max total invocations per parent group (0=unlimited)
+RALPH_GH_MAX_REVIEW_RETRIES="${RALPH_GH_MAX_REVIEW_RETRIES:-2}"    # Max /review fix cycles per sub-issue (each one = 1 review + 1 impl call)
 
 # =============================================================================
 # REPO AUTO-DETECTION
@@ -196,6 +197,7 @@ process_parent_group() {
 
         # Loop per sub-issue: re-invoke Claude until all gates pass or limit hit
         local loop_count=0
+        local review_retry_count=0
         local sub_done=false
         local retry_context=""
 
@@ -273,7 +275,11 @@ process_parent_group() {
                 continue
             fi
 
-            # Gate 2: per-sub /review against the sub-issue start ref (list-only, no fixes)
+            # Gate 2: per-sub /review against the sub-issue start ref (list-only, no fixes).
+            # Capped by RALPH_GH_MAX_REVIEW_RETRIES — after the cap, the findings are
+            # logged and the sub-issue is accepted. This prevents an expensive
+            # review → fix → review loop from eating the whole Claude budget on
+            # findings Claude can't converge on. Max loops remains the hard ceiling.
             local review_findings
             if ! review_findings=$(run_per_sub_review \
                 "$RALPH_GH_WORKSPACE" \
@@ -281,10 +287,21 @@ process_parent_group() {
                 "$RALPH_GH_ALLOWED_TOOLS" \
                 8 \
                 "$sub_start_ref"); then
-                log_status "WARN" "Sub-issue #$sub_number: REVIEW gate found issues"
-                retry_context="REVIEW GATE FAILED. A /review pass on your sub-issue diff surfaced the following findings — fix them and ensure the ACCEPTANCE block still reports all criteria as [X]:"$'\n\n'"$review_findings"
-                record_result "true" "true"
-                continue
+                if [[ $review_retry_count -ge $RALPH_GH_MAX_REVIEW_RETRIES ]]; then
+                    log_status "WARN" "Sub-issue #$sub_number: REVIEW gate still has findings after $review_retry_count retry(s), accepting sub-issue anyway"
+                    log_status "WARN" "Unresolved findings (will need human follow-up):"$'\n'"$review_findings"
+                    # Persist findings so they can be surfaced on the PR later
+                    mkdir -p "$RALPH_GH_STATE_DIR/unresolved_findings"
+                    echo "## Sub-issue #$sub_number — unresolved review findings"$'\n\n'"$review_findings" \
+                        > "$RALPH_GH_STATE_DIR/unresolved_findings/sub_${sub_number}.md"
+                    # Fall through to success path
+                else
+                    review_retry_count=$((review_retry_count + 1))
+                    log_status "WARN" "Sub-issue #$sub_number: REVIEW gate found issues (retry $review_retry_count/$RALPH_GH_MAX_REVIEW_RETRIES)"
+                    retry_context="REVIEW GATE FAILED. A /review pass on your sub-issue diff surfaced the following findings — fix them and ensure the ACCEPTANCE block still reports all criteria as [X]:"$'\n\n'"$review_findings"
+                    record_result "true" "true"
+                    continue
+                fi
             fi
 
             # All gates passed — commit any remaining uncommitted work
