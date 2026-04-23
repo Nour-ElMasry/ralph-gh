@@ -32,6 +32,7 @@ CB_SAME_ERROR_THRESHOLD="${CB_SAME_ERROR_THRESHOLD:-5}"
 RALPH_GH_MAX_LOOPS_PER_ISSUE="${RALPH_GH_MAX_LOOPS_PER_ISSUE:-8}"  # Max Claude invocations per sub-issue (includes acceptance-gate retries)
 RALPH_GH_MAX_LOOPS_TOTAL="${RALPH_GH_MAX_LOOPS_TOTAL:-0}"          # Max total invocations per parent group (0=unlimited)
 RALPH_GH_MAX_REVIEW_RUNS="${RALPH_GH_MAX_REVIEW_RUNS:-2}"          # Max end-of-group /review-best-practices runs before opening PR
+RALPH_GH_SIMPLIFY_ENABLED="${RALPH_GH_SIMPLIFY_ENABLED:-1}"        # Set to 0 to skip per-sub-issue /simplify pass
 
 # =============================================================================
 # REPO AUTO-DETECTION
@@ -284,6 +285,30 @@ process_parent_group() {
             [[ -z "$sub_title" ]] && sub_title="Sub-issue $sub_number"
             commit_changes "$sub_number" "$sub_title" || \
                 log_status "WARN" "commit_changes failed for #$sub_number, continuing"
+
+            # Per-sub-issue /simplify pass (one-shot, non-fatal).
+            # Runs against the sub-issue diff ($sub_start_ref..HEAD) so the
+            # skill sees only this sub-issue's work. Failures are logged and
+            # ignored — the sub-issue is already acceptance-gated and committed.
+            if [[ "$RALPH_GH_SIMPLIFY_ENABLED" == "1" ]]; then
+                clear_saved_session
+                local simplify_head_before
+                simplify_head_before=$(git rev-parse HEAD 2>/dev/null)
+                if execute_simplify \
+                    "$RALPH_GH_WORKSPACE" \
+                    "$sub_number" \
+                    "$sub_start_ref" \
+                    "$RALPH_GH_ALLOWED_TOOLS" \
+                    "$CLAUDE_TIMEOUT_MINUTES"; then
+                    local simplify_head_after
+                    simplify_head_after=$(git rev-parse HEAD 2>/dev/null)
+                    if [[ "$simplify_head_before" != "$simplify_head_after" ]]; then
+                        log_status "INFO" "Simplify committed fixes for #$sub_number (${simplify_head_before:0:8} -> ${simplify_head_after:0:8})"
+                    fi
+                else
+                    log_status "WARN" "Simplify pass for #$sub_number failed or timed out — continuing"
+                fi
+            fi
 
             mark_sub_complete "$sub_number"
             check_off_sub_issue "$RALPH_GH_REPO" "$parent_number" "$sub_number" || true

@@ -625,8 +625,142 @@ execute_changeset() {
     return 0
 }
 
+# Build the simplify prompt for post-sub-issue /simplify pass
+build_simplify_prompt() {
+    local workspace=$1
+    local sub_issue_number=$2
+    local sub_start_ref=$3
+
+    local prompt=""
+
+    # Check for project-specific prompt
+    if [[ -f "$workspace/.ralph/PROMPT.md" ]]; then
+        prompt=$(cat "$workspace/.ralph/PROMPT.md")
+        prompt+=$'\n\n---\n\n'
+    fi
+
+    # Add AGENT.md build instructions if available
+    if [[ -f "$workspace/.ralph/AGENT.md" ]]; then
+        prompt+="## Build & Run Instructions"
+        prompt+=$'\n\n'
+        prompt+=$(cat "$workspace/.ralph/AGENT.md")
+        prompt+=$'\n\n'
+    fi
+
+    prompt+="## Task: Post-Implementation /simplify Pass"
+    prompt+=$'\n\n'
+    prompt+="You just finished sub-issue #${sub_issue_number}. The changes you introduced are committed between \`${sub_start_ref}\` and \`HEAD\`."
+    prompt+=$'\n\n'
+    prompt+="Run \`/simplify\` over that diff (\`git diff ${sub_start_ref}...HEAD\`). The skill reviews changed code for reuse opportunities, quality, and efficiency, then fixes any issues found."
+    prompt+=$'\n\n'
+    prompt+="If the skill surfaces issues, fix them and commit with a conventional commit message (\`refactor:\` or \`fix:\`)."
+    prompt+=$'\n'
+    prompt+="If nothing needs changing, report COMPLETE without making any changes."
+    prompt+=$'\n\n'
+
+    # Add rules
+    prompt+=$(cat <<'RULES'
+## Rules
+1. Run /simplify first — do not skip it
+2. Only touch files inside the sub-issue diff unless /simplify identifies a reuse opportunity in a closely adjacent file
+3. Commit fixes with descriptive conventional commit messages (e.g. refactor: ..., fix: ...)
+4. Do NOT close issues or open PRs — that is handled externally
+5. Do NOT modify .ralph-gh/ or .ralph/ state files
+6. Do NOT run `pnpm changeset` — changesets are handled after all sub-issues complete
+7. If /simplify finds nothing actionable, do NOT make any file changes — report COMPLETE
+
+## Status Report (REQUIRED - end of every response)
+
+```
+---RALPH_STATUS---
+STATUS: IN_PROGRESS | COMPLETE | BLOCKED
+FILES_MODIFIED: <number>
+TESTS_STATUS: PASSING | FAILING | NOT_RUN
+EXIT_SIGNAL: false | true
+RECOMMENDATION: <one line>
+---END_RALPH_STATUS---
+```
+RULES
+)
+
+    echo "$prompt"
+}
+
+# Execute a /simplify pass against the just-finished sub-issue's diff.
+# One-shot (no retry loop), non-fatal (caller ignores failure).
+# Returns: 0 on success, 1 on failure.
+execute_simplify() {
+    local workspace=$1
+    local sub_issue_number=$2
+    local sub_start_ref=$3
+    local allowed_tools=$4
+    local timeout_minutes=$5
+
+    local timeout_seconds=$((timeout_minutes * 60))
+
+    log_status "INFO" "Running /simplify for sub-issue #$sub_issue_number..."
+
+    # Build the simplify prompt
+    local prompt
+    prompt=$(build_simplify_prompt "$workspace" "$sub_issue_number" "$sub_start_ref")
+
+    # Build Claude CLI command
+    local -a cmd_args=("claude")
+    cmd_args+=("--output-format" "json")
+
+    # Add allowed tools
+    if [[ -n "$allowed_tools" ]]; then
+        cmd_args+=("--allowedTools")
+        local IFS=','
+        read -ra tools_array <<< "$allowed_tools"
+        for tool in "${tools_array[@]}"; do
+            tool=$(echo "$tool" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            if [[ -n "$tool" ]]; then
+                cmd_args+=("$tool")
+            fi
+        done
+    fi
+
+    # Add the prompt
+    cmd_args+=("-p" "$prompt")
+
+    # Execute with timeout
+    local output_file="$RALPH_GH_STATE_DIR/logs/claude_simplify_$(date '+%Y%m%d_%H%M%S').log"
+    mkdir -p "$(dirname "$output_file")"
+
+    log_status "INFO" "Invoking Claude Code for simplify (timeout: ${timeout_minutes}m)..."
+
+    local exit_code=0
+    portable_timeout "${timeout_seconds}s" "${cmd_args[@]}" \
+        < /dev/null > "$output_file" 2>/dev/null
+    exit_code=$?
+
+    if [[ $exit_code -eq 124 ]]; then
+        log_status "WARN" "Simplify timed out after ${timeout_minutes} minutes"
+        return 1
+    fi
+
+    if [[ $exit_code -ne 0 ]]; then
+        log_status "ERROR" "Simplify Claude invocation exited with code $exit_code"
+        return 1
+    fi
+
+    # Commit any simplify fixes
+    if ! git diff --quiet HEAD 2>/dev/null || ! git diff --cached --quiet 2>/dev/null || \
+       [[ -n "$(git ls-files --others --exclude-standard 2>/dev/null)" ]]; then
+        git add -A -- ':!.ralph-gh' 2>/dev/null || true
+        git commit -m "refactor(ralph): simplify sub-issue #$sub_issue_number" 2>/dev/null || true
+        log_status "SUCCESS" "Simplify fixes committed for #$sub_issue_number"
+    else
+        log_status "INFO" "Simplify complete — no fixes needed for #$sub_issue_number"
+    fi
+
+    return 0
+}
+
 export -f build_full_prompt execute_for_sub_issue
 export -f build_review_prompt execute_review
+export -f build_simplify_prompt execute_simplify
 export -f build_changeset_prompt execute_changeset
 export -f get_saved_session_id clear_saved_session
 export -f run_acceptance_gate
