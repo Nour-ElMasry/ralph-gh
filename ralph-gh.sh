@@ -31,8 +31,7 @@ CB_NO_PROGRESS_THRESHOLD="${CB_NO_PROGRESS_THRESHOLD:-3}"
 CB_SAME_ERROR_THRESHOLD="${CB_SAME_ERROR_THRESHOLD:-5}"
 RALPH_GH_MAX_LOOPS_PER_ISSUE="${RALPH_GH_MAX_LOOPS_PER_ISSUE:-8}"  # Max Claude invocations per sub-issue (includes acceptance-gate retries)
 RALPH_GH_MAX_LOOPS_TOTAL="${RALPH_GH_MAX_LOOPS_TOTAL:-0}"          # Max total invocations per parent group (0=unlimited)
-RALPH_GH_MAX_REVIEW_RUNS="${RALPH_GH_MAX_REVIEW_RUNS:-2}"          # Max end-of-group /review-best-practices runs before opening PR
-RALPH_GH_SIMPLIFY_ENABLED="${RALPH_GH_SIMPLIFY_ENABLED:-1}"        # Set to 0 to skip per-sub-issue /simplify pass
+RALPH_GH_MAX_REVIEW_RUNS="${RALPH_GH_MAX_REVIEW_RUNS:-1}"          # Max end-of-group /review-best-practices runs before opening PR
 
 # =============================================================================
 # REPO AUTO-DETECTION
@@ -183,6 +182,13 @@ process_parent_group() {
             break
         fi
 
+        # If this is the only sub remaining, the model also creates the changeset
+        # in this same Claude call (saves a separate invocation at group-end).
+        local is_last_sub="false"
+        if [[ "$(get_remaining_subs | wc -l)" == "1" ]]; then
+            is_last_sub="true"
+        fi
+
         log_status "LOOP" "=== Sub-issue #$sub_number ==="
 
         # Clear session from previous sub-issue (prevent context bleed)
@@ -246,7 +252,8 @@ process_parent_group() {
                 "$session_id" \
                 "$RALPH_GH_ALLOWED_TOOLS" \
                 "$CLAUDE_TIMEOUT_MINUTES" \
-                "$retry_context" || result=$?
+                "$retry_context" \
+                "$is_last_sub" || result=$?
 
             if [[ $result -ne 0 ]]; then
                 record_result "false" "true"
@@ -285,30 +292,6 @@ process_parent_group() {
             [[ -z "$sub_title" ]] && sub_title="Sub-issue $sub_number"
             commit_changes "$sub_number" "$sub_title" || \
                 log_status "WARN" "commit_changes failed for #$sub_number, continuing"
-
-            # Per-sub-issue /simplify pass (one-shot, non-fatal).
-            # Runs against the sub-issue diff ($sub_start_ref..HEAD) so the
-            # skill sees only this sub-issue's work. Failures are logged and
-            # ignored — the sub-issue is already acceptance-gated and committed.
-            if [[ "$RALPH_GH_SIMPLIFY_ENABLED" == "1" ]]; then
-                clear_saved_session
-                local simplify_head_before
-                simplify_head_before=$(git rev-parse HEAD 2>/dev/null)
-                if execute_simplify \
-                    "$RALPH_GH_WORKSPACE" \
-                    "$sub_number" \
-                    "$sub_start_ref" \
-                    "$RALPH_GH_ALLOWED_TOOLS" \
-                    "$CLAUDE_TIMEOUT_MINUTES"; then
-                    local simplify_head_after
-                    simplify_head_after=$(git rev-parse HEAD 2>/dev/null)
-                    if [[ "$simplify_head_before" != "$simplify_head_after" ]]; then
-                        log_status "INFO" "Simplify committed fixes for #$sub_number (${simplify_head_before:0:8} -> ${simplify_head_after:0:8})"
-                    fi
-                else
-                    log_status "WARN" "Simplify pass for #$sub_number failed or timed out — continuing"
-                fi
-            fi
 
             mark_sub_complete "$sub_number"
             check_off_sub_issue "$RALPH_GH_REPO" "$parent_number" "$sub_number" || true
@@ -352,31 +335,6 @@ process_parent_group() {
 
         log_status "INFO" "Pre-PR review run $review_run committed fixes (HEAD ${head_before:0:8} -> ${head_after:0:8})"
     done
-
-    # Create changeset summarizing all work
-    log_status "INFO" "Creating changeset for parent #$parent_number..."
-    local completed_subs_for_changeset
-    completed_subs_for_changeset=$(get_completed_subs)
-    local subs_summary=""
-    while IFS= read -r sub; do
-        [[ -z "$sub" ]] && continue
-        local title
-        title=$(get_issue_title "$RALPH_GH_REPO" "$sub") || title=""
-        [[ -z "$title" ]] && title="Sub-issue $sub"
-        subs_summary+="#${sub} - ${title}"$'\n'
-    done <<< "$completed_subs_for_changeset"
-
-    clear_saved_session
-    if ! execute_changeset \
-        "$RALPH_GH_WORKSPACE" \
-        "$RALPH_GH_REPO" \
-        "$RALPH_GH_MAIN_BRANCH" \
-        "$parent_number" \
-        "$subs_summary" \
-        "$RALPH_GH_ALLOWED_TOOLS" \
-        "$CLAUDE_TIMEOUT_MINUTES"; then
-        log_status "WARN" "Changeset creation failed — proceeding with PR anyway"
-    fi
 
     complete_group "$parent_number" "$branch_name"
     return 0

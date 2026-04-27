@@ -2,8 +2,9 @@
 
 # issue_worker.sh - Per-sub-issue Claude Code invocation for ralph-gh
 
-# Build the full prompt, combining project prompt + issue context
-# Optional 8th arg: retry_context — failure reason from a prior gate so Claude can fix it
+# Build the full prompt, combining project prompt + issue context.
+# When is_last_sub=true, also instructs the model to create the parent-group
+# changeset in the same Claude call (saves a separate end-of-group invocation).
 build_full_prompt() {
     local workspace=$1
     local sub_issue_number=$2
@@ -13,6 +14,7 @@ build_full_prompt() {
     local parent_issue_title=$6
     local completed_subs=$7
     local retry_context=${8:-}
+    local is_last_sub=${9:-false}
 
     local prompt=""
 
@@ -47,19 +49,26 @@ build_full_prompt() {
         prompt+=$'\n\n'
     fi
 
+    # Final step: changeset for the parent group (only on the last sub-issue).
+    # The model creates one changeset covering the whole body of work, in this
+    # same call, so we don't need a separate Claude invocation at group end.
+    local changeset_rule="8. Do NOT run \`pnpm changeset\` — changesets are handled after all sub-issues complete."
+    if [[ "$is_last_sub" == "true" ]]; then
+        changeset_rule="8. **This is the LAST sub-issue in the parent group.** After the sub-issue work is committed, also create the parent-group changeset: run \`pnpm changeset\` to create ONE changeset summarizing the overall feature/fix for parent #${parent_issue_number} (not one per sub-issue), then \`git add .changeset && git commit -m \"chore: add changeset for #${parent_issue_number}\"\`. Use \`git log --oneline\` on the branch to see what to summarize."
+    fi
+
     # Add rules
-    prompt+=$(cat <<'RULES'
-## Rules
+    prompt+=$'## Rules\n\n'
+    prompt+=$'1. **Search the codebase before assuming anything.** Look for existing patterns, utilities, and components before writing new ones.\n'
+    prompt+=$'2. **TDD is mandatory.** Use the `/tdd` skill. For every acceptance criterion with testable behavior, write one failing test first, run it red, implement, run it green. For UI-only criteria, describe the manual verification step.\n'
+    prompt+=$'3. **A Stop hook enforces `pnpm --filter api test:unit && pnpm --filter api build` (plus frontend equivalents) before you can end your turn.** Run these yourself during implementation — do not rely on the hook catching your mistakes. If the hook blocks you, use the `/test-fixing` skill to resolve the failures.\n'
+    prompt+=$'4. **Acceptance criteria are the contract.** Every checklist item in the issue body (`- [ ]`) must be satisfied. Report each one explicitly in the ACCEPTANCE block below — shell will refuse to mark the sub-issue complete if any are unchecked.\n'
+    prompt+=$'5. **Commit with descriptive conventional commit messages** (`feat:`, `fix:`, `test:`, `refactor:`).\n'
+    prompt+=$'6. Do NOT close issues or open PRs — handled externally.\n'
+    prompt+=$'7. Do NOT modify `.ralph-gh/` or `.ralph/` state files.\n'
+    prompt+="$changeset_rule"$'\n\n'
 
-1. **Search the codebase before assuming anything.** Look for existing patterns, utilities, and components before writing new ones.
-2. **TDD is mandatory.** Use the `/tdd` skill. For every acceptance criterion with testable behavior, write one failing test first, run it red, implement, run it green. For UI-only criteria, describe the manual verification step.
-3. **A Stop hook enforces `pnpm --filter api test:unit && pnpm --filter api build` (plus frontend equivalents) before you can end your turn.** Run these yourself during implementation — do not rely on the hook catching your mistakes. If the hook blocks you, use the `/test-fixing` skill to resolve the failures.
-4. **Acceptance criteria are the contract.** Every checklist item in the issue body (`- [ ]`) must be satisfied. Report each one explicitly in the ACCEPTANCE block below — shell will refuse to mark the sub-issue complete if any are unchecked.
-5. **Commit with descriptive conventional commit messages** (`feat:`, `fix:`, `test:`, `refactor:`).
-6. Do NOT close issues or open PRs — handled externally.
-7. Do NOT modify `.ralph-gh/` or `.ralph/` state files.
-8. Do NOT run `pnpm changeset` — changesets are handled after all sub-issues complete.
-
+    prompt+=$(cat <<'STATUS_BLOCK'
 ## Status Report (REQUIRED — end of every response)
 
 ```
@@ -80,7 +89,7 @@ ACCEPTANCE:
 - `[X]` only if the criterion is genuinely satisfied and you can point to evidence (file:line, test name, or visible behavior).
 - `[ ]` if not yet met — explain why. The shell parses this and re-invokes you until all items are `[X]`.
 - If the issue has no explicit checklist, list 2-4 criteria you inferred from the issue description.
-RULES
+STATUS_BLOCK
 )
 
     echo "$prompt"
@@ -89,6 +98,7 @@ RULES
 # Execute Claude Code for a single sub-issue
 # Returns: 0=success, 1=failure, 2=circuit-break
 # Optional 8th arg: retry_context from a prior gate failure
+# Optional 9th arg: is_last_sub ("true"/"false") — append changeset block to prompt
 execute_for_sub_issue() {
     local workspace=$1
     local repo=$2
@@ -98,6 +108,7 @@ execute_for_sub_issue() {
     local allowed_tools=$6
     local timeout_minutes=$7
     local retry_context=${8:-}
+    local is_last_sub=${9:-false}
 
     local timeout_seconds=$((timeout_minutes * 60))
 
@@ -145,7 +156,8 @@ execute_for_sub_issue() {
         "$parent_issue_number" \
         "$parent_title" \
         "$completed_subs_list" \
-        "$retry_context")
+        "$retry_context" \
+        "$is_last_sub")
 
     # Build Claude CLI command
     local -a cmd_args=("claude")
@@ -522,246 +534,8 @@ execute_review() {
     return 0
 }
 
-# Build a prompt for changeset creation
-build_changeset_prompt() {
-    local workspace=$1
-    local main_branch=$2
-    local parent_issue_number=$3
-    local subs_summary=$4
-
-    local parent_title
-    parent_title=$(get_issue_title "$RALPH_GH_REPO" "$parent_issue_number") || parent_title=""
-    [[ -z "$parent_title" ]] && parent_title="Issue $parent_issue_number"
-
-    cat <<CHANGESET_EOF
-You are creating a changeset for a completed group of work.
-
-## Parent Issue: #${parent_issue_number} - ${parent_title}
-
-## Completed sub-issues:
-${subs_summary}
-
-## Instructions
-1. Review the git diff against main to understand all changes: \`git diff ${main_branch}...HEAD\`
-2. Run \`pnpm changeset\` to create a changeset file that summarizes the overall feature/fix
-3. Create ONE changeset that covers the entire body of work (not one per sub-issue)
-4. After creating the changeset, stage and commit it with: \`git add .changeset && git commit -m "chore: add changeset for #${parent_issue_number}"\`
-5. Do NOT close issues or open PRs
-
-## Status Report (REQUIRED)
-
-\`\`\`
----RALPH_STATUS---
-STATUS: COMPLETE
-FILES_MODIFIED: 1
-TESTS_STATUS: NOT_RUN
-EXIT_SIGNAL: false
-RECOMMENDATION: Changeset created
----END_RALPH_STATUS---
-\`\`\`
-CHANGESET_EOF
-}
-
-# Execute Claude Code to create a changeset after all sub-issues complete
-execute_changeset() {
-    local workspace=$1
-    local repo=$2
-    local main_branch=$3
-    local parent_issue_number=$4
-    local subs_summary=$5
-    local allowed_tools=$6
-    local timeout_minutes=$7
-
-    local timeout_seconds=$((timeout_minutes * 60))
-
-    log_status "INFO" "Creating changeset for parent #$parent_issue_number..."
-
-    # Build the changeset prompt
-    local prompt
-    prompt=$(build_changeset_prompt "$workspace" "$main_branch" "$parent_issue_number" "$subs_summary")
-
-    # Build Claude CLI command
-    local -a cmd_args=("claude")
-    cmd_args+=("--output-format" "json")
-
-    # Add allowed tools
-    if [[ -n "$allowed_tools" ]]; then
-        cmd_args+=("--allowedTools")
-        local IFS=','
-        read -ra tools_array <<< "$allowed_tools"
-        for tool in "${tools_array[@]}"; do
-            tool=$(echo "$tool" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-            if [[ -n "$tool" ]]; then
-                cmd_args+=("$tool")
-            fi
-        done
-    fi
-
-    # Add the prompt
-    cmd_args+=("-p" "$prompt")
-
-    # Execute with timeout
-    local output_file="$RALPH_GH_STATE_DIR/logs/claude_changeset_$(date '+%Y%m%d_%H%M%S').log"
-    mkdir -p "$(dirname "$output_file")"
-
-    log_status "INFO" "Invoking Claude Code for changeset (timeout: ${timeout_minutes}m)..."
-
-    local exit_code=0
-    portable_timeout "${timeout_seconds}s" "${cmd_args[@]}" \
-        < /dev/null > "$output_file" 2>/dev/null
-    exit_code=$?
-
-    if [[ $exit_code -eq 124 ]]; then
-        log_status "WARN" "Changeset creation timed out after ${timeout_minutes} minutes"
-        return 1
-    fi
-
-    if [[ $exit_code -ne 0 ]]; then
-        log_status "ERROR" "Changeset Claude invocation exited with code $exit_code"
-        return 1
-    fi
-
-    log_status "SUCCESS" "Changeset created for parent #$parent_issue_number"
-    return 0
-}
-
-# Build the simplify prompt for post-sub-issue /simplify pass
-build_simplify_prompt() {
-    local workspace=$1
-    local sub_issue_number=$2
-    local sub_start_ref=$3
-
-    local prompt=""
-
-    # Check for project-specific prompt
-    if [[ -f "$workspace/.ralph/PROMPT.md" ]]; then
-        prompt=$(cat "$workspace/.ralph/PROMPT.md")
-        prompt+=$'\n\n---\n\n'
-    fi
-
-    # Add AGENT.md build instructions if available
-    if [[ -f "$workspace/.ralph/AGENT.md" ]]; then
-        prompt+="## Build & Run Instructions"
-        prompt+=$'\n\n'
-        prompt+=$(cat "$workspace/.ralph/AGENT.md")
-        prompt+=$'\n\n'
-    fi
-
-    prompt+="## Task: Post-Implementation /simplify Pass"
-    prompt+=$'\n\n'
-    prompt+="You just finished sub-issue #${sub_issue_number}. The changes you introduced are committed between \`${sub_start_ref}\` and \`HEAD\`."
-    prompt+=$'\n\n'
-    prompt+="Run \`/simplify\` over that diff (\`git diff ${sub_start_ref}...HEAD\`). The skill reviews changed code for reuse opportunities, quality, and efficiency, then fixes any issues found."
-    prompt+=$'\n\n'
-    prompt+="If the skill surfaces issues, fix them and commit with a conventional commit message (\`refactor:\` or \`fix:\`)."
-    prompt+=$'\n'
-    prompt+="If nothing needs changing, report COMPLETE without making any changes."
-    prompt+=$'\n\n'
-
-    # Add rules
-    prompt+=$(cat <<'RULES'
-## Rules
-1. Run /simplify first — do not skip it
-2. Only touch files inside the sub-issue diff unless /simplify identifies a reuse opportunity in a closely adjacent file
-3. Commit fixes with descriptive conventional commit messages (e.g. refactor: ..., fix: ...)
-4. Do NOT close issues or open PRs — that is handled externally
-5. Do NOT modify .ralph-gh/ or .ralph/ state files
-6. Do NOT run `pnpm changeset` — changesets are handled after all sub-issues complete
-7. If /simplify finds nothing actionable, do NOT make any file changes — report COMPLETE
-
-## Status Report (REQUIRED - end of every response)
-
-```
----RALPH_STATUS---
-STATUS: IN_PROGRESS | COMPLETE | BLOCKED
-FILES_MODIFIED: <number>
-TESTS_STATUS: PASSING | FAILING | NOT_RUN
-EXIT_SIGNAL: false | true
-RECOMMENDATION: <one line>
----END_RALPH_STATUS---
-```
-RULES
-)
-
-    echo "$prompt"
-}
-
-# Execute a /simplify pass against the just-finished sub-issue's diff.
-# One-shot (no retry loop), non-fatal (caller ignores failure).
-# Returns: 0 on success, 1 on failure.
-execute_simplify() {
-    local workspace=$1
-    local sub_issue_number=$2
-    local sub_start_ref=$3
-    local allowed_tools=$4
-    local timeout_minutes=$5
-
-    local timeout_seconds=$((timeout_minutes * 60))
-
-    log_status "INFO" "Running /simplify for sub-issue #$sub_issue_number..."
-
-    # Build the simplify prompt
-    local prompt
-    prompt=$(build_simplify_prompt "$workspace" "$sub_issue_number" "$sub_start_ref")
-
-    # Build Claude CLI command
-    local -a cmd_args=("claude")
-    cmd_args+=("--output-format" "json")
-
-    # Add allowed tools
-    if [[ -n "$allowed_tools" ]]; then
-        cmd_args+=("--allowedTools")
-        local IFS=','
-        read -ra tools_array <<< "$allowed_tools"
-        for tool in "${tools_array[@]}"; do
-            tool=$(echo "$tool" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-            if [[ -n "$tool" ]]; then
-                cmd_args+=("$tool")
-            fi
-        done
-    fi
-
-    # Add the prompt
-    cmd_args+=("-p" "$prompt")
-
-    # Execute with timeout
-    local output_file="$RALPH_GH_STATE_DIR/logs/claude_simplify_$(date '+%Y%m%d_%H%M%S').log"
-    mkdir -p "$(dirname "$output_file")"
-
-    log_status "INFO" "Invoking Claude Code for simplify (timeout: ${timeout_minutes}m)..."
-
-    local exit_code=0
-    portable_timeout "${timeout_seconds}s" "${cmd_args[@]}" \
-        < /dev/null > "$output_file" 2>/dev/null
-    exit_code=$?
-
-    if [[ $exit_code -eq 124 ]]; then
-        log_status "WARN" "Simplify timed out after ${timeout_minutes} minutes"
-        return 1
-    fi
-
-    if [[ $exit_code -ne 0 ]]; then
-        log_status "ERROR" "Simplify Claude invocation exited with code $exit_code"
-        return 1
-    fi
-
-    # Commit any simplify fixes
-    if ! git diff --quiet HEAD 2>/dev/null || ! git diff --cached --quiet 2>/dev/null || \
-       [[ -n "$(git ls-files --others --exclude-standard 2>/dev/null)" ]]; then
-        git add -A -- ':!.ralph-gh' 2>/dev/null || true
-        git commit -m "refactor(ralph): simplify sub-issue #$sub_issue_number" 2>/dev/null || true
-        log_status "SUCCESS" "Simplify fixes committed for #$sub_issue_number"
-    else
-        log_status "INFO" "Simplify complete — no fixes needed for #$sub_issue_number"
-    fi
-
-    return 0
-}
-
 export -f build_full_prompt execute_for_sub_issue
 export -f build_review_prompt execute_review
-export -f build_simplify_prompt execute_simplify
-export -f build_changeset_prompt execute_changeset
 export -f get_saved_session_id clear_saved_session
 export -f run_acceptance_gate
 export -f run_e2e_pre_check
