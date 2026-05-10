@@ -152,5 +152,150 @@ worktree_cleanup_on_signal() {
     exit 130
 }
 
+# =============================================================================
+# Sub-worktrees for parallel execution within a parent PRD.
+#
+# Topology when a parent issue has parallel sub-issues:
+#   <repo>/.ralph-workers/issue-<parent>/             ← parent worktree (existing)
+#     ├── node_modules/                                ← installed once at parent
+#     ├── sub-<sub_id_a>/                              ← branched off ralph/issue-<parent>
+#     ├── sub-<sub_id_b>/                              ← branched off ralph/issue-<parent>
+#     └── sub-<sub_id_c>/                              ← created AFTER deps merge
+#
+# `cp -al` copies node_modules from the parent worktree into each sub-worktree
+# via hardlinks: zero disk overhead, ~3 s vs. ~2 min `pnpm install`.
+# =============================================================================
+
+# Set up a sub-worktree for one sub-issue. Branches `ralph/issue-<parent>-<sub>`
+# off the current parent branch tip.
+sub_worktree_setup() {
+    local parent_issue=$1
+    local sub_issue=$2
+    local parent_branch=$3
+
+    local parent_worktree="$WORKTREE_BASE/issue-${parent_issue}"
+    local sub_worktree="$parent_worktree/sub-${sub_issue}"
+    local sub_branch="ralph/issue-${parent_issue}-${sub_issue}"
+
+    if [[ -d "$sub_worktree" ]]; then
+        log_status "WARN" "Sub-worktree already exists at $sub_worktree, removing"
+        git -C "$parent_worktree" worktree remove "$sub_worktree" --force 2>/dev/null || rm -rf "$sub_worktree"
+    fi
+
+    log_status "INFO" "Creating sub-worktree for #$sub_issue from $parent_branch"
+    if ! git -C "$parent_worktree" worktree add "$sub_worktree" -b "$sub_branch" "$parent_branch" 2>/dev/null; then
+        # Resume case: branch already exists
+        if git -C "$parent_worktree" show-ref --verify --quiet "refs/heads/$sub_branch"; then
+            git -C "$parent_worktree" worktree add "$sub_worktree" "$sub_branch" 2>/dev/null
+        else
+            log_status "ERROR" "Failed to create sub-worktree for #$sub_issue"
+            return 1
+        fi
+    fi
+
+    # Hardlink-share node_modules. pnpm uses content-addressed store, so even
+    # cross-worktree symlinks resolve into ~/.local/share/pnpm/store, not into
+    # the parent worktree itself.
+    if [[ -d "$parent_worktree/node_modules" ]]; then
+        log_status "INFO" "Hardlink-sharing node_modules into sub-worktree #$sub_issue"
+        cp -al "$parent_worktree/node_modules" "$sub_worktree/" 2>/dev/null || \
+            log_status "WARN" "cp -al node_modules failed; sub-worker will need to install"
+    fi
+
+    # Hardlink any nested workspace node_modules (e.g. packages/database/node_modules
+    # for generated Prisma client).
+    while IFS= read -r nm; do
+        local rel="${nm#$parent_worktree/}"
+        local target_dir="$sub_worktree/$(dirname "$rel")"
+        if [[ ! -e "$sub_worktree/$rel" && -d "$target_dir" ]]; then
+            cp -al "$nm" "$sub_worktree/$rel" 2>/dev/null || true
+        fi
+    done < <(find "$parent_worktree" -maxdepth 4 -type d -name node_modules ! -path "$parent_worktree/node_modules" 2>/dev/null)
+
+    # Manifest lives outside the worktree so `git clean` can't wipe it.
+    local sub_state_dir="$HOME/.ralph-gh/runs/issue-${parent_issue}/sub-${sub_issue}"
+    mkdir -p "$sub_state_dir/logs"
+    cat > "$sub_state_dir/manifest.json" <<EOF
+{
+    "parent_issue": $parent_issue,
+    "sub_issue": $sub_issue,
+    "parent_branch": "$parent_branch",
+    "sub_branch": "$sub_branch",
+    "sub_worktree": "$sub_worktree",
+    "created_at": "$(get_iso_timestamp)"
+}
+EOF
+
+    log_status "SUCCESS" "Sub-worktree ready for #$sub_issue at $sub_worktree"
+    return 0
+}
+
+sub_worktree_cleanup() {
+    local parent_issue=$1
+    local sub_issue=$2
+
+    local parent_worktree="$WORKTREE_BASE/issue-${parent_issue}"
+    local sub_worktree="$parent_worktree/sub-${sub_issue}"
+    local sub_state_dir="$HOME/.ralph-gh/runs/issue-${parent_issue}/sub-${sub_issue}"
+
+    if [[ -d "$sub_worktree" ]]; then
+        git -C "$parent_worktree" worktree remove "$sub_worktree" --force 2>/dev/null || rm -rf "$sub_worktree"
+    fi
+    rm -rf "$sub_state_dir" 2>/dev/null || true
+}
+
+# Squash-merge a sub-branch into the parent branch. On conflict, leaves the
+# working tree dirty and echoes conflicted paths on stdout (caller invokes
+# the reconciler).
+sub_worktree_merge() {
+    local parent_issue=$1
+    local sub_issue=$2
+
+    local parent_worktree="$WORKTREE_BASE/issue-${parent_issue}"
+    local sub_branch="ralph/issue-${parent_issue}-${sub_issue}"
+
+    local sub_title
+    sub_title=$(get_issue_title "$RALPH_GH_REPO" "$sub_issue") || sub_title="Sub-issue $sub_issue"
+
+    log_status "INFO" "Squash-merging $sub_branch into parent worktree"
+    if ! git -C "$parent_worktree" merge --squash "$sub_branch" 2>/dev/null; then
+        local conflicts
+        conflicts=$(git -C "$parent_worktree" diff --name-only --diff-filter=U 2>/dev/null)
+        log_status "WARN" "Merge conflict for #$sub_issue in: $conflicts"
+        echo "$conflicts"
+        return 1
+    fi
+
+    if ! git -C "$parent_worktree" commit -m "feat(ralph): #${sub_issue} - ${sub_title}" 2>/dev/null; then
+        log_status "WARN" "Squash commit produced no changes for #$sub_issue"
+        git -C "$parent_worktree" merge --abort 2>/dev/null || true
+        return 1
+    fi
+
+    log_status "SUCCESS" "Squash-merged #$sub_issue into parent"
+    return 0
+}
+
+# Run post-merge verification (build + lint) from the parent worktree. Returns
+# 0 if green, 1 if red. Caller invokes reconciler on red.
+sub_worktree_verify_parent() {
+    local parent_issue=$1
+    local parent_worktree="$WORKTREE_BASE/issue-${parent_issue}"
+    local log_file="$HOME/.ralph-gh/runs/issue-${parent_issue}/post-merge-verify-$(date '+%Y%m%d_%H%M%S').log"
+    mkdir -p "$(dirname "$log_file")"
+
+    log_status "INFO" "Running post-merge verification (build + lint) in $parent_worktree"
+    if (cd "$parent_worktree" && portable_timeout 900s bash -c 'pnpm build && pnpm lint' < /dev/null > "$log_file" 2>&1); then
+        log_status "SUCCESS" "Post-merge verification green"
+        return 0
+    fi
+
+    log_status "WARN" "Post-merge verification failed (log: $log_file)"
+    echo "$log_file"
+    return 1
+}
+
 export -f worktree_setup worktree_cleanup worktree_cleanup_on_signal
 export -f _worktree_create
+export -f sub_worktree_setup sub_worktree_cleanup
+export -f sub_worktree_merge sub_worktree_verify_parent

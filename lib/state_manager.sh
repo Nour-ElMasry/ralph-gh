@@ -160,9 +160,178 @@ update_last_poll() {
     save_state "$state"
 }
 
+# =============================================================================
+# DAG state for parallel execution.
+#
+# When a parent's body declares `depends_on:` lines, the orchestrator stores
+# the DAG plus per-sub execution state under .in_progress.dag:
+#   "dag": {
+#     "raw":     <dag JSON from dag_parse_body>,
+#     "ready":   [<sub_id>, ...],   -- waiting for capacity
+#     "running": [<sub_id>, ...],   -- background workers in flight
+#     "merged":  [<sub_id>, ...],   -- squash-merged into parent branch
+#     "failed":  [<sub_id>, ...],   -- terminal failure or dep-failure cascade
+#     "blocked": [<sub_id>, ...]    -- deps not yet satisfied
+#   }
+# Invariant: every sub appears in EXACTLY ONE bucket. Mutations go through
+# the dag_state_* helpers below. Legacy state without this field continues to
+# work via the old serial loop.
+# =============================================================================
+
+# Initialize .in_progress.dag from a raw dag JSON. All subs start `blocked`;
+# the scheduler then promotes zero-dep subs to `ready` via dag_state_promote_ready.
+dag_state_init() {
+    local dag_json=$1
+    local subs_json
+    subs_json=$(echo "$dag_json" | jq '.subs')
+
+    local state
+    state=$(load_state)
+    state=$(echo "$state" | jq \
+        --argjson dag "$dag_json" \
+        --argjson subs "$subs_json" \
+        '.in_progress.dag = {
+            "raw": $dag,
+            "ready":   [],
+            "running": [],
+            "merged":  [],
+            "failed":  [],
+            "blocked": $subs
+        }')
+    save_state "$state"
+}
+
+dag_state_get() { jq -c '.in_progress.dag // null' "$STATE_FILE" 2>/dev/null; }
+
+dag_state_active() {
+    local d
+    d=$(dag_state_get)
+    [[ -n "$d" && "$d" != "null" ]]
+}
+
+# Promote all currently-blocked subs whose deps are all merged.
+# Echoes JSON array of newly-promoted sub ids.
+dag_state_promote_ready() {
+    local state dag merged failed blocked newly_ready
+    state=$(load_state)
+    dag=$(echo "$state" | jq -c '.in_progress.dag.raw')
+    merged=$(echo "$state" | jq -c '.in_progress.dag.merged')
+    failed=$(echo "$state" | jq -c '.in_progress.dag.failed')
+    blocked=$(echo "$state" | jq -c '.in_progress.dag.blocked')
+
+    newly_ready=$(dag_compute_ready "$dag" "$merged" "$failed" "$blocked")
+    if [[ "$(echo "$newly_ready" | jq 'length')" == "0" ]]; then
+        echo '[]'
+        return 0
+    fi
+
+    state=$(echo "$state" | jq \
+        --argjson promoted "$newly_ready" \
+        '.in_progress.dag.ready   += $promoted
+       | .in_progress.dag.blocked -= $promoted')
+    save_state "$state"
+    echo "$newly_ready"
+}
+
+# Cascade-fail blocked subs whose deps include a failed sub.
+dag_state_cascade_failures() {
+    local state dag failed blocked cascaded
+    state=$(load_state)
+    dag=$(echo "$state" | jq -c '.in_progress.dag.raw')
+    failed=$(echo "$state" | jq -c '.in_progress.dag.failed')
+    blocked=$(echo "$state" | jq -c '.in_progress.dag.blocked')
+
+    cascaded=$(dag_compute_cascade_failures "$dag" "$failed" "$blocked")
+    if [[ "$(echo "$cascaded" | jq 'length')" == "0" ]]; then
+        echo '[]'
+        return 0
+    fi
+
+    state=$(echo "$state" | jq \
+        --argjson cascaded "$cascaded" \
+        '.in_progress.dag.failed  += $cascaded
+       | .in_progress.dag.blocked -= $cascaded')
+    save_state "$state"
+    echo "$cascaded"
+}
+
+dag_state_mark_running() {
+    local sub=$1
+    local state
+    state=$(load_state)
+    state=$(echo "$state" | jq --argjson s "$sub" \
+        '.in_progress.dag.ready   -= [$s]
+       | .in_progress.dag.running += [$s]')
+    save_state "$state"
+}
+
+dag_state_mark_merged() {
+    local sub=$1
+    local state
+    state=$(load_state)
+    state=$(echo "$state" | jq --argjson s "$sub" \
+        '.in_progress.dag.running -= [$s]
+       | .in_progress.dag.merged += [$s]
+       | .in_progress.completed_subs += [$s]
+       | .in_progress.remaining_subs -= [$s]')
+    save_state "$state"
+}
+
+dag_state_mark_failed() {
+    local sub=$1
+    local state
+    state=$(load_state)
+    state=$(echo "$state" | jq --argjson s "$sub" \
+        '.in_progress.dag.running -= [$s]
+       | .in_progress.dag.failed += [$s]
+       | .in_progress.remaining_subs -= [$s]')
+    save_state "$state"
+}
+
+dag_state_running_count() { jq '.in_progress.dag.running | length' "$STATE_FILE" 2>/dev/null; }
+dag_state_ready_count()   { jq '.in_progress.dag.ready   | length' "$STATE_FILE" 2>/dev/null; }
+dag_state_blocked_count() { jq '.in_progress.dag.blocked | length' "$STATE_FILE" 2>/dev/null; }
+dag_state_failed_count()  { jq '.in_progress.dag.failed  | length' "$STATE_FILE" 2>/dev/null; }
+
+dag_state_running_subs() { jq -r '.in_progress.dag.running[]' "$STATE_FILE" 2>/dev/null; }
+dag_state_ready_subs()   { jq -r '.in_progress.dag.ready[]'   "$STATE_FILE" 2>/dev/null; }
+dag_state_merged_subs()  { jq -r '.in_progress.dag.merged[]'  "$STATE_FILE" 2>/dev/null; }
+dag_state_failed_subs()  { jq -r '.in_progress.dag.failed[]'  "$STATE_FILE" 2>/dev/null; }
+
+# Pop the next ready sub. Removes from `ready` so concurrent reapers don't
+# double-spawn; caller must call dag_state_mark_running afterwards.
+dag_state_pop_ready() {
+    local state next
+    state=$(load_state)
+    next=$(echo "$state" | jq -r '.in_progress.dag.ready[0] // empty')
+    if [[ -z "$next" || "$next" == "null" ]]; then
+        return 1
+    fi
+    state=$(echo "$state" | jq --argjson s "$next" \
+        '.in_progress.dag.ready -= [$s]')
+    save_state "$state"
+    echo "$next"
+}
+
+# Lock helper for state mutations across background reapers/spawners.
+with_dag_state_lock() {
+    local lock_file="${DAG_STATE_LOCK:-$STATE_DIR/.dag.lock}"
+    mkdir -p "$(dirname "$lock_file")"
+    (
+        flock -x 200
+        "$@"
+    ) 200>"$lock_file"
+}
+
 export -f init_state load_state save_state
 export -f has_in_progress set_in_progress
 export -f mark_sub_complete get_remaining_subs get_completed_subs
 export -f get_in_progress_parent get_in_progress_branch
 export -f mark_parent_processed clear_in_progress is_processed clear_processed
 export -f update_last_poll
+export -f dag_state_init dag_state_get dag_state_active
+export -f dag_state_promote_ready dag_state_cascade_failures
+export -f dag_state_mark_running dag_state_mark_merged dag_state_mark_failed
+export -f dag_state_running_count dag_state_ready_count dag_state_blocked_count dag_state_failed_count
+export -f dag_state_running_subs dag_state_ready_subs dag_state_merged_subs dag_state_failed_subs
+export -f dag_state_pop_ready with_dag_state_lock

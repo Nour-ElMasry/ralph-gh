@@ -34,6 +34,47 @@ parse_completed_tasks() {
     echo "$body" | grep -oE '\- \[[xX]\] #[0-9]+' | grep -oE '#[0-9]+' | sed 's/#//'
 }
 
+# Parse the issue body into a DAG (subs + dependency graph). Echoes JSON like:
+#   {"subs":[522,523,524],"deps":{"522":[],"523":[],"524":[522,523]}}
+# Sub-issues without `depends_on:` lines fall back to legacy serial behavior
+# (each depends on the immediately-prior sub). Returns 0 on success, 1 if the
+# resulting DAG fails validation.
+parse_task_dag() {
+    local body=$1
+    local dag
+    dag=$(dag_parse_body "$body")
+    if [[ -z "$dag" ]]; then
+        echo '{"subs":[],"deps":{}}'
+        return 0
+    fi
+    if ! dag_validate "$dag" 2>/dev/null; then
+        log_status "ERROR" "Parsed DAG is invalid (cycle or unknown ref)"
+        return 1
+    fi
+    echo "$dag"
+}
+
+# True if the DAG describes any genuine fan-out (a sub with empty deps when
+# another sub has explicit deps, or any sub with >1 deps). Used by the
+# orchestrator to decide between the parallel scheduler and the legacy serial
+# loop. Strictly-serial DAGs (each sub depends on the prior one) take the
+# legacy path so existing PRDs behave identically.
+dag_has_parallelism() {
+    local dag=$1
+    echo "$dag" | jq -e '
+        . as $d
+        | ($d.subs | length) as $n
+        | if $n <= 1 then false
+          else
+            # Parallelism iff any non-first sub has zero deps, OR any sub has
+            # >1 deps (genuine join). Strictly-serial DAGs return false.
+            ($d.subs[1:] | any(. as $s | (($d.deps[$s | tostring] // []) | length) == 0))
+            or
+            ($d.deps | [.[]] | any(. | length > 1))
+          end
+    ' > /dev/null 2>&1
+}
+
 # Wrap a gh call with retry + backoff to tolerate GitHub's secondary rate
 # limits (which kick in around 60 req/min on issue endpoints). Echoes stdout
 # on success, returns non-zero only after all attempts fail. Logs the last

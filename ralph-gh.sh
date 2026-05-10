@@ -10,12 +10,15 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 # Source library modules
 source "$SCRIPT_DIR/lib/date_utils.sh"
 source "$SCRIPT_DIR/lib/utils.sh"
+source "$SCRIPT_DIR/lib/dag.sh"
 source "$SCRIPT_DIR/lib/state_manager.sh"
 source "$SCRIPT_DIR/lib/github_poller.sh"
 source "$SCRIPT_DIR/lib/branch_manager.sh"
 source "$SCRIPT_DIR/lib/circuit_breaker.sh"
 source "$SCRIPT_DIR/lib/issue_worker.sh"
 source "$SCRIPT_DIR/lib/worktree_manager.sh"
+source "$SCRIPT_DIR/lib/reconciler.sh"
+source "$SCRIPT_DIR/lib/parallel_orchestrator.sh"
 
 # =============================================================================
 # DEFAULTS
@@ -32,6 +35,9 @@ CB_SAME_ERROR_THRESHOLD="${CB_SAME_ERROR_THRESHOLD:-5}"
 RALPH_GH_MAX_LOOPS_PER_ISSUE="${RALPH_GH_MAX_LOOPS_PER_ISSUE:-8}"  # Max Claude invocations per sub-issue (includes acceptance-gate retries)
 RALPH_GH_MAX_LOOPS_TOTAL="${RALPH_GH_MAX_LOOPS_TOTAL:-0}"          # Max total invocations per parent group (0=unlimited)
 RALPH_GH_MAX_REVIEW_RUNS="${RALPH_GH_MAX_REVIEW_RUNS:-1}"          # Max end-of-group /review-best-practices runs before opening PR
+RALPH_MAX_PARALLEL="${RALPH_MAX_PARALLEL:-1}"                      # Max concurrent sub-workers per parent (1=disable parallelism, default for safety)
+RALPH_RECONCILER_MODEL="${RALPH_RECONCILER_MODEL:-claude-sonnet-4-6}"  # Model for merge reconciliation (cheaper than worker model)
+RALPH_RECONCILER_TIMEOUT_MINUTES="${RALPH_RECONCILER_TIMEOUT_MINUTES:-15}"
 
 # =============================================================================
 # REPO AUTO-DETECTION
@@ -172,9 +178,38 @@ process_parent_group() {
         return 1
     fi
 
-    # Process each remaining sub-issue sequentially
-    # Re-read from state each iteration (resilient to external state changes)
-    while true; do
+    # If the parent has a parallel DAG, hand off to the parallel scheduler.
+    # The serial loop below remains the path for legacy / strictly-serial DAGs.
+    if dag_state_active; then
+        local dag_json
+        dag_json=$(jq -c '.in_progress.dag.raw' "$STATE_FILE" 2>/dev/null)
+        if [[ -n "$dag_json" && "$dag_json" != "null" ]] \
+           && [[ "${RALPH_MAX_PARALLEL:-1}" -gt 1 ]] \
+           && dag_has_parallelism "$dag_json"; then
+            log_status "INFO" "Parent #$parent_number uses parallel DAG (max_parallel=$RALPH_MAX_PARALLEL)"
+
+            # Set WORKTREE_BASE if not already (we're inside process_targeted_in_worktree
+            # most of the time, but be defensive for poll mode)
+            if [[ -z "${WORKTREE_BASE:-}" ]]; then
+                WORKTREE_BASE="${_RALPH_MAIN_WORKSPACE:-$RALPH_GH_WORKSPACE}/.ralph-workers"
+            fi
+
+            local parallel_result=0
+            parallel_process_dag "$parent_number" "$branch_name" || parallel_result=$?
+
+            # Skip the serial loop entirely; jump straight to the post-merge review
+            if [[ $parallel_result -ne 0 ]]; then
+                log_status "WARN" "Parallel scheduler reported failures; opening PR with what merged"
+            fi
+
+            # Fall through to the pre-PR /review pass below (same as serial path)
+            goto_review_pass=true
+        fi
+    fi
+
+    # Process each remaining sub-issue sequentially (legacy path).
+    # Re-read from state each iteration (resilient to external state changes).
+    while [[ "${goto_review_pass:-false}" != "true" ]]; do
         local sub_number
         sub_number=$(get_remaining_subs | head -1)
 
@@ -519,6 +554,18 @@ process_targeted_issue() {
         mapfile -t valid_sub_array <<< "$valid_subs"
         set_in_progress "$issue_number" "$branch_name" "${valid_sub_array[@]}"
         log_status "SUCCESS" "Set up work for parent #$issue_number with ${#valid_sub_array[@]} sub-issues"
+
+        # If the body declares a DAG with parallelism, store it for the scheduler.
+        # Strictly-serial DAGs (legacy) are skipped → fall through to serial loop.
+        local dag_json
+        if dag_json=$(parse_task_dag "$body"); then
+            if dag_has_parallelism "$dag_json"; then
+                dag_state_init "$dag_json"
+                log_status "INFO" "DAG with parallelism detected for parent #$issue_number"
+            fi
+        else
+            log_status "WARN" "DAG parse failed; falling back to serial execution"
+        fi
     fi
 
     process_parent_group
@@ -601,6 +648,18 @@ poll_and_process() {
         mapfile -t valid_sub_array <<< "$valid_subs"
         set_in_progress "$num" "$branch_name" "${valid_sub_array[@]}"
         log_status "SUCCESS" "Set up work for parent #$num with ${#valid_sub_array[@]} sub-issues"
+
+        # Initialize DAG state if the body declares parallelism
+        local dag_json
+        if dag_json=$(parse_task_dag "$body"); then
+            if dag_has_parallelism "$dag_json"; then
+                dag_state_init "$dag_json"
+                log_status "INFO" "DAG with parallelism detected for parent #$num"
+            fi
+        else
+            log_status "WARN" "DAG parse failed for parent #$num; falling back to serial execution"
+        fi
+
         update_last_poll
         return 0
     done
