@@ -237,9 +237,17 @@ sub_worktree_cleanup() {
     local parent_worktree="$WORKTREE_BASE/issue-${parent_issue}"
     local sub_worktree="$parent_worktree/sub-${sub_issue}"
     local sub_state_dir="$HOME/.ralph-gh/runs/issue-${parent_issue}/sub-${sub_issue}"
+    local sub_branch="ralph/issue-${parent_issue}-${sub_issue}"
 
     if [[ -d "$sub_worktree" ]]; then
         git -C "$parent_worktree" worktree remove "$sub_worktree" --force 2>/dev/null || rm -rf "$sub_worktree"
+    fi
+    # Delete the sub-branch: on success its work is captured by the squash
+    # commit on the parent branch; on failure the worktree was already torn
+    # down so the dangling ref is just clutter. Use -D (force) because the
+    # branch is unmerged from git's POV (squash != merge).
+    if git -C "$_RALPH_MAIN_WORKSPACE" show-ref --verify --quiet "refs/heads/$sub_branch" 2>/dev/null; then
+        git -C "$_RALPH_MAIN_WORKSPACE" branch -D "$sub_branch" 2>/dev/null || true
     fi
     rm -rf "$sub_state_dir" 2>/dev/null || true
 }
