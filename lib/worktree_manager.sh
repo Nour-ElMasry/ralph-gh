@@ -252,9 +252,18 @@ sub_worktree_cleanup() {
     rm -rf "$sub_state_dir" 2>/dev/null || true
 }
 
-# Squash-merge a sub-branch into the parent branch. On conflict, leaves the
-# working tree dirty and echoes conflicted paths on stdout (caller invokes
-# the reconciler).
+# Squash-merge a sub-branch into the parent branch. Distinguishes four outcomes
+# via return code so callers can decide whether to invoke the reconciler:
+#
+#   0 = clean merge + commit landed
+#   1 = real merge conflict (unmerged paths exist; conflicted paths on stdout)
+#   2 = empty squash (sub-branch's work is already on parent — skip, don't reconcile)
+#   3 = commit refused for non-conflict reasons (hook failure, dirty tree, etc.);
+#       caller should NOT invoke reconciler — the failure isn't semantic.
+#
+# Uses --no-verify on the squash commit: pre-commit hooks are for human commits;
+# ralph's squash is a robot-driven integration that re-runs lint via the
+# post-merge verify pass anyway.
 sub_worktree_merge() {
     local parent_issue=$1
     local sub_issue=$2
@@ -266,22 +275,71 @@ sub_worktree_merge() {
     sub_title=$(get_issue_title "$RALPH_GH_REPO" "$sub_issue") || sub_title="Sub-issue $sub_issue"
 
     log_status "INFO" "Squash-merging $sub_branch into parent worktree"
-    if ! git -C "$parent_worktree" merge --squash "$sub_branch" 2>/dev/null; then
+
+    local merge_stderr
+    merge_stderr=$(git -C "$parent_worktree" merge --squash "$sub_branch" 2>&1 >/dev/null)
+    local merge_rc=$?
+
+    if [[ $merge_rc -ne 0 ]]; then
+        # Two cases here: real conflict (unmerged paths) or refused-to-start
+        # (dirty tree, locked refs, etc.). Distinguish them.
         local conflicts
         conflicts=$(git -C "$parent_worktree" diff --name-only --diff-filter=U 2>/dev/null)
-        log_status "WARN" "Merge conflict for #$sub_issue in: $conflicts"
-        echo "$conflicts"
-        return 1
+        if [[ -n "$conflicts" ]]; then
+            log_status "WARN" "Merge conflict for #$sub_issue in: $conflicts"
+            echo "$conflicts"
+            return 1
+        fi
+        log_status "ERROR" "merge --squash for #$sub_issue refused (no conflict): $merge_stderr"
+        # Try to leave the worktree in a sane state
+        git -C "$parent_worktree" reset --hard HEAD 2>/dev/null || true
+        return 3
     fi
 
-    if ! git -C "$parent_worktree" commit -m "feat(ralph): #${sub_issue} - ${sub_title}" 2>/dev/null; then
-        log_status "WARN" "Squash commit produced no changes for #$sub_issue"
-        git -C "$parent_worktree" merge --abort 2>/dev/null || true
-        return 1
+    # merge --squash succeeded — check whether it actually staged anything.
+    # If nothing's staged, the sub-branch's commits are already represented on
+    # parent (or were no-ops); treat as a benign skip, not a reconcile case.
+    if git -C "$parent_worktree" diff --cached --quiet 2>/dev/null; then
+        log_status "INFO" "No changes from #$sub_issue squash — work already on parent or sub was empty"
+        # `merge --abort` after `merge --squash` is a no-op (no MERGE_HEAD),
+        # but reset --hard clears any stray un-staged residue.
+        git -C "$parent_worktree" reset --hard HEAD 2>/dev/null || true
+        return 2
+    fi
+
+    local commit_stderr
+    commit_stderr=$(git -C "$parent_worktree" commit --no-verify \
+        -m "feat(ralph): #${sub_issue} - ${sub_title}" 2>&1 >/dev/null)
+    local commit_rc=$?
+    if [[ $commit_rc -ne 0 ]]; then
+        log_status "ERROR" "Squash commit refused for #$sub_issue: $commit_stderr"
+        git -C "$parent_worktree" reset --hard HEAD 2>/dev/null || true
+        return 3
     fi
 
     log_status "SUCCESS" "Squash-merged #$sub_issue into parent"
     return 0
+}
+
+# Check whether a squash commit for this sub already exists on the parent
+# branch. Looks for `feat(ralph): #<sub>` in commit subjects since the merge
+# base with origin/<main>. Used after a failed reconcile to decide whether
+# the work was actually saved (Sonnet may commit then time out during verify).
+sub_commit_is_on_parent() {
+    local parent_issue=$1
+    local sub_issue=$2
+    local main_branch="${3:-${RALPH_GH_MAIN_BRANCH:-main}}"
+
+    local parent_worktree="$WORKTREE_BASE/issue-${parent_issue}"
+    [[ -d "$parent_worktree" ]] || return 1
+
+    local base
+    base=$(git -C "$parent_worktree" merge-base HEAD "origin/$main_branch" 2>/dev/null) \
+        || base=$(git -C "$parent_worktree" rev-parse "origin/$main_branch" 2>/dev/null) \
+        || return 1
+
+    git -C "$parent_worktree" log --format=%s "${base}..HEAD" 2>/dev/null \
+        | grep -qE "^(feat|chore|fix)\(ralph\): #${sub_issue}( |\$|-)"
 }
 
 # Run post-merge verification (build + lint) from the parent worktree. Returns
@@ -306,4 +364,4 @@ sub_worktree_verify_parent() {
 export -f worktree_setup worktree_cleanup worktree_cleanup_on_signal
 export -f _worktree_create
 export -f sub_worktree_setup sub_worktree_cleanup
-export -f sub_worktree_merge sub_worktree_verify_parent
+export -f sub_worktree_merge sub_worktree_verify_parent sub_commit_is_on_parent

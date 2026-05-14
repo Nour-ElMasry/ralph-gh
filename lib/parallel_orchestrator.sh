@@ -23,6 +23,14 @@
 
 WORKER_TICK_SECONDS="${WORKER_TICK_SECONDS:-3}"
 
+# After this many reconciler failures within a single parent run, future
+# reconciler invocations short-circuit to failure. Stops a stuck reconciler
+# from burning the whole wall-clock budget twice.
+RALPH_RECONCILE_GIVE_UP_AFTER="${RALPH_RECONCILE_GIVE_UP_AFTER:-1}"
+
+# Per-run counter of reconciler failures; reset at scheduler entry.
+_RALPH_RECONCILE_FAILURES=0
+
 # Spawn a background worker for one sub-issue. The worker:
 #   - cd's into its sub-worktree
 #   - sets up RALPH_GH_WORKSPACE / STATE_DIR for the sub
@@ -194,9 +202,11 @@ _reap_finished_workers() {
 
         # Worker succeeded — merge into parent. The parent worktree's git ops
         # need an exclusive lock because two reaps could fire near-simultaneously
-        # and corrupt the index.
+        # and corrupt the index. We hold the lock for the full merge+verify+
+        # reconcile cycle to keep the parent worktree single-writer, but cap
+        # reconciler attempts per run so a hung reconciler doesn't burn the
+        # whole budget (see RALPH_RECONCILE_GIVE_UP_AFTER).
         local merge_result=0
-        local conflicts=""
         with_dag_state_lock _merge_one_sub "$parent_issue" "$sub" "$parent_branch" || merge_result=$?
         sub_worktree_cleanup "$parent_issue" "$sub"
     done <<< "$(dag_state_running_subs)"
@@ -207,52 +217,167 @@ _reap_finished_workers() {
 # Internal: merge a single sub-branch into parent, run post-merge verify,
 # invoke reconciler on failure, and update DAG state. Must be called inside
 # with_dag_state_lock to serialize parent-worktree git ops.
+#
+# sub_worktree_merge return codes are routed:
+#   0 — clean merge → run verify, reconcile if red
+#   1 — real conflict → invoke reconciler with conflict list
+#   2 — empty squash → mark merged (work already on parent), no reconcile
+#   3 — refused (hook/dirty tree) → mark failed, no reconcile (not semantic)
 _merge_one_sub() {
     local parent_issue=$1
     local sub=$2
     local parent_branch=$3
 
     local conflicts
-    if conflicts=$(sub_worktree_merge "$parent_issue" "$sub"); then
-        # Clean merge — now run post-merge verify
-        local verify_log
-        if verify_log=$(sub_worktree_verify_parent "$parent_issue"); then
-            dag_state_mark_merged "$sub"
-            return 0
-        fi
+    conflicts=$(sub_worktree_merge "$parent_issue" "$sub")
+    local merge_rc=$?
 
-        # Post-merge verify failed — try reconciler
-        log_status "WARN" "Post-merge verify failed for #$sub; invoking reconciler"
-        local merged_so_far
-        merged_so_far=$(dag_state_merged_subs | tr '\n' ',' | sed 's/,$//')
-        local sub_branches="ralph/issue-${parent_issue}-${sub}"
-        if [[ -n "$merged_so_far" ]]; then
-            for prev in $(echo "$merged_so_far" | tr ',' ' '); do
-                sub_branches+=",ralph/issue-${parent_issue}-${prev}"
-            done
-        fi
-        if reconcile_merge "$parent_issue" "$parent_branch" "$sub_branches" "post_merge_verify" "" "$verify_log"; then
+    case "$merge_rc" in
+        0)
+            # Clean merge — now run post-merge verify
+            local verify_log
+            if verify_log=$(sub_worktree_verify_parent "$parent_issue"); then
+                dag_state_mark_merged "$sub"
+                return 0
+            fi
+            _try_reconcile_or_finalize "$parent_issue" "$sub" "$parent_branch" \
+                "post_merge_verify" "" "$verify_log"
+            return $?
+            ;;
+        1)
+            # Real conflict
+            _try_reconcile_or_finalize "$parent_issue" "$sub" "$parent_branch" \
+                "merge_conflict" "$conflicts" ""
+            return $?
+            ;;
+        2)
+            # Empty squash — sub-branch's work is already on parent (e.g. a
+            # prior reconciler committed it). Count as merged so dependents
+            # can proceed.
             dag_state_mark_merged "$sub"
             return 0
-        fi
-        dag_state_mark_failed "$sub"
+            ;;
+        3 | *)
+            # Refused commit (hook / dirty tree / unknown). Not a semantic
+            # merge problem; don't burn a reconciler on it.
+            log_status "ERROR" "Merge for #$sub refused (rc=$merge_rc); marking failed"
+            _cleanup_parent_worktree "$parent_issue"
+            _finalize_sub_outcome "$parent_issue" "$sub"
+            return 1
+            ;;
+    esac
+}
+
+# Run the reconciler (or skip it if the give-up threshold is reached),
+# then map the outcome to DAG state. Always leaves the parent worktree clean
+# if it didn't end on a green commit.
+_try_reconcile_or_finalize() {
+    local parent_issue=$1
+    local sub=$2
+    local parent_branch=$3
+    local kind=$4
+    local conflict_files=$5
+    local failure_log_path=$6
+
+    if (( _RALPH_RECONCILE_FAILURES >= RALPH_RECONCILE_GIVE_UP_AFTER )); then
+        log_status "WARN" "Reconciler give-up threshold reached (${_RALPH_RECONCILE_FAILURES}>=${RALPH_RECONCILE_GIVE_UP_AFTER}); skipping reconcile for #$sub"
+        _cleanup_parent_worktree "$parent_issue"
+        _finalize_sub_outcome "$parent_issue" "$sub"
         return 1
     fi
 
-    # `conflicts` contains the list of conflicted files
-    log_status "WARN" "Merge conflict for #$sub; invoking reconciler"
+    log_status "WARN" "$kind failure for #$sub; invoking reconciler"
+    local merged_so_far
+    merged_so_far=$(dag_state_merged_subs | tr '\n' ',' | sed 's/,$//')
     local sub_branches="ralph/issue-${parent_issue}-${sub}"
-    if reconcile_merge "$parent_issue" "$parent_branch" "$sub_branches" "merge_conflict" "$conflicts" ""; then
+    if [[ -n "$merged_so_far" ]]; then
+        for prev in $(echo "$merged_so_far" | tr ',' ' '); do
+            sub_branches+=",ralph/issue-${parent_issue}-${prev}"
+        done
+    fi
+
+    if reconcile_merge "$parent_issue" "$parent_branch" "$sub_branches" \
+            "$kind" "$conflict_files" "$failure_log_path"; then
         dag_state_mark_merged "$sub"
         return 0
     fi
 
-    # Reconciler failed — abort the merge state so we leave the worktree clean
-    local parent_worktree="$WORKTREE_BASE/issue-${parent_issue}"
-    git -C "$parent_worktree" merge --abort 2>/dev/null || true
-    git -C "$parent_worktree" reset --hard HEAD 2>/dev/null || true
-    dag_state_mark_failed "$sub"
+    _RALPH_RECONCILE_FAILURES=$((_RALPH_RECONCILE_FAILURES + 1))
+    _cleanup_parent_worktree "$parent_issue"
+    _finalize_sub_outcome "$parent_issue" "$sub"
     return 1
+}
+
+# Map a sub to merged/failed based on whether its commit actually landed.
+# Sonnet sometimes commits then times out during verify — we should not lose
+# that work for downstream cascade purposes.
+_finalize_sub_outcome() {
+    local parent_issue=$1
+    local sub=$2
+
+    if sub_commit_is_on_parent "$parent_issue" "$sub" "$RALPH_GH_MAIN_BRANCH"; then
+        log_status "INFO" "Commit for #$sub is on parent branch; treating as merged despite reconcile failure"
+        dag_state_mark_merged "$sub"
+    else
+        dag_state_mark_failed "$sub"
+    fi
+}
+
+# Resume support: for each sub currently in the `blocked` bucket, check
+# whether the parent branch already has its squash commit. If so, move it to
+# `merged` (and `completed_subs`) so dependents can promote.
+#
+# This is what makes a re-run of ralph on a partially-done parent issue Just
+# Work — no manual checkbox ticking, no state surgery. The git log is the
+# source of truth.
+_seed_merged_from_branch() {
+    local parent_issue=$1
+    local subs sub seeded=0
+
+    subs=$(jq -r '.in_progress.dag.blocked[]' "$STATE_FILE" 2>/dev/null || true)
+    while IFS= read -r sub; do
+        [[ -z "$sub" ]] && continue
+        if sub_commit_is_on_parent "$parent_issue" "$sub" "$RALPH_GH_MAIN_BRANCH"; then
+            log_status "INFO" "Resume: #$sub already on parent branch, seeding as merged"
+            with_dag_state_lock _dag_state_seed_merged "$sub"
+            seeded=$((seeded + 1))
+        fi
+    done <<< "$subs"
+
+    if (( seeded > 0 )); then
+        log_status "INFO" "Seeded $seeded sub(s) into merged bucket from prior branch state"
+    fi
+}
+
+# Inline transition: move a sub from blocked → merged + completed_subs.
+# Mirrors dag_state_mark_merged but starts from blocked, not running.
+_dag_state_seed_merged() {
+    local sub=$1
+    local state
+    state=$(load_state)
+    state=$(echo "$state" | jq --argjson s "$sub" \
+        '.in_progress.dag.blocked -= [$s]
+       | .in_progress.dag.merged  += [$s]
+       | .in_progress.completed_subs += [$s]
+       | .in_progress.remaining_subs -= [$s]')
+    save_state "$state"
+}
+
+# Best-effort: leave the parent worktree on a clean HEAD with no uncommitted
+# changes. Safe to call at any point in the merge/reconcile lifecycle.
+_cleanup_parent_worktree() {
+    local parent_issue=$1
+    local parent_worktree="$WORKTREE_BASE/issue-${parent_issue}"
+    [[ -d "$parent_worktree" ]] || return 0
+
+    # If a merge is in progress (we got here via real conflict path), abort it.
+    if [[ -f "$parent_worktree/.git/MERGE_HEAD" ]]; then
+        git -C "$parent_worktree" merge --abort 2>/dev/null || true
+    fi
+    # Drop staged + unstaged changes. Keeps any committed work intact.
+    git -C "$parent_worktree" reset --hard HEAD 2>/dev/null || true
+    # Untracked debris (e.g. orphan files written by a killed reconciler).
+    git -C "$parent_worktree" clean -fd 2>/dev/null || true
 }
 
 # Spawn workers up to capacity from the ready queue.
@@ -296,6 +421,14 @@ parallel_process_dag() {
 
     log_status "INFO" "Parallel scheduler engaged (max_parallel=${RALPH_MAX_PARALLEL:-2})"
 
+    # Reset per-run reconciler counter (this scheduler call is one "run").
+    _RALPH_RECONCILE_FAILURES=0
+
+    # Resume case: if the parent branch already contains squash commits for
+    # some subs (e.g. a prior run got partway and we're picking back up), seed
+    # them into the merged bucket so dependents can promote on the first tick.
+    _seed_merged_from_branch "$parent_issue"
+
     # Promote initial zero-dep subs to ready
     with_dag_state_lock dag_state_promote_ready >/dev/null
 
@@ -325,11 +458,12 @@ parallel_process_dag() {
         sleep "$WORKER_TICK_SECONDS"
     done
 
-    # Summarize
+    # Summarize. merged_count comes from grep -c (always returns 0/N, never
+    # blank); failed_count from the state JSON.
     local merged_count failed_count
     merged_count=$(dag_state_merged_subs | grep -c . || true)
     failed_count=$(dag_state_failed_count)
-    log_status "INFO" "DAG complete: merged=$merged_count failed=$failed_count"
+    log_status "INFO" "DAG complete: merged=$merged_count failed=$failed_count reconciler_failures=$_RALPH_RECONCILE_FAILURES"
 
     if (( failed_count > 0 )); then
         return 1
@@ -340,3 +474,5 @@ parallel_process_dag() {
 export -f parallel_process_dag
 export -f _spawn_sub_worker _worker_alive _worker_exit_code
 export -f _reap_finished_workers _merge_one_sub _spawn_up_to_capacity
+export -f _try_reconcile_or_finalize _finalize_sub_outcome _cleanup_parent_worktree
+export -f _seed_merged_from_branch _dag_state_seed_merged

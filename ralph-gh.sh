@@ -375,10 +375,21 @@ process_parent_group() {
     return 0
 }
 
-# Build a formatted list of completed sub-issues (used for PRs and comments)
+# Build a formatted list of completed sub-issues (used for PRs and comments).
+#
+# Source of truth is the parent branch's git log, not the scheduler's state:
+# scheduler state can lie if a reconciler timed out after the sub-commit
+# already landed. We union state-completed and on-branch evidence so we never
+# omit work that's actually being shipped.
 build_completed_subs_list() {
-    local completed_subs
-    completed_subs=$(get_completed_subs)
+    local state_subs branch_subs combined
+    state_subs=$(get_completed_subs 2>/dev/null | grep -E '^[0-9]+$' || true)
+    branch_subs=$(_completed_subs_from_branch 2>/dev/null || true)
+
+    combined=$(printf '%s\n%s\n' "$state_subs" "$branch_subs" \
+        | grep -E '^[0-9]+$' \
+        | sort -un)
+
     local list=""
     while IFS= read -r sub; do
         [[ -z "$sub" ]] && continue
@@ -386,8 +397,25 @@ build_completed_subs_list() {
         title=$(get_issue_title "$RALPH_GH_REPO" "$sub") || title=""
         [[ -z "$title" ]] && title="Sub-issue $sub"
         list+="- #${sub} - ${title}"$'\n'
-    done <<< "$completed_subs"
+    done <<< "$combined"
     echo "${list:-None}"
+}
+
+# Mine the current branch's commit log for `feat(ralph): #<N>` (or chore/fix)
+# subjects since the merge base with the configured main branch. Emits one
+# sub-issue number per line.
+_completed_subs_from_branch() {
+    local main_branch="${RALPH_GH_MAIN_BRANCH:-main}"
+    local base
+    base=$(git merge-base HEAD "origin/$main_branch" 2>/dev/null) \
+        || base=$(git rev-parse "origin/$main_branch" 2>/dev/null) \
+        || return 0  # no remote ref — silently produce no entries
+
+    git log --format=%s "${base}..HEAD" 2>/dev/null \
+        | grep -oE '^(feat|chore|fix)\(ralph\): #[0-9]+' \
+        | grep -oE '#[0-9]+' \
+        | tr -d '#' \
+        | sort -un
 }
 
 # Complete a parent group: push, PR, close sub-issues, remove label
@@ -416,6 +444,7 @@ complete_group() {
     parent_title=$(get_issue_title "$RALPH_GH_REPO" "$parent_number") || parent_title=""
     [[ -z "$parent_title" ]] && parent_title="Issue $parent_number"
 
+    local closed_count=0
     if [[ "$is_standalone" == "true" ]]; then
         # Standalone issue — PR closes the issue directly
         log_status "INFO" "Opening PR for standalone issue #$parent_number..."
@@ -428,6 +457,7 @@ complete_group() {
         log_status "INFO" "Closing issue #$parent_number"
         close_sub_issue "$RALPH_GH_REPO" "$parent_number" \
             "Completed by ralph-gh. PR opened." || true
+        closed_count=1
     else
         # Parent with sub-issues
         local completed_list
@@ -439,13 +469,21 @@ complete_group() {
             log_status "WARN" "Failed to open PR for parent #$parent_number"
         fi
 
-        # Close sub-issues
+        # Close sub-issues. Use the union view (state + branch) so a sub whose
+        # work landed despite a reconcile timeout still gets closed honestly.
+        local subs_to_close
+        subs_to_close=$(printf '%s\n%s\n' \
+            "$(get_completed_subs 2>/dev/null)" \
+            "$(_completed_subs_from_branch 2>/dev/null)" \
+            | grep -E '^[0-9]+$' \
+            | sort -un)
         while IFS= read -r sub; do
             [[ -z "$sub" ]] && continue
             log_status "INFO" "Closing sub-issue #$sub"
             close_sub_issue "$RALPH_GH_REPO" "$sub" \
                 "Completed by ralph-gh as part of parent issue #$parent_number" || true
-        done <<< "$completed_subs"
+            closed_count=$((closed_count + 1))
+        done <<< "$subs_to_close"
     fi
 
     # Remove label from issue
@@ -455,7 +493,11 @@ complete_group() {
     # Update state
     mark_parent_processed "$parent_number"
 
-    log_status "SUCCESS" "Parent #$parent_number complete. PR opened, sub-issues closed."
+    if (( closed_count > 0 )); then
+        log_status "SUCCESS" "Parent #$parent_number complete. PR opened, $closed_count issue(s) closed."
+    else
+        log_status "WARN" "Parent #$parent_number: PR opened with no completed sub-issues to close. Manual triage needed."
+    fi
 }
 
 # Abort a parent group: push partial work, draft PR, comment
