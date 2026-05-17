@@ -344,14 +344,21 @@ sub_commit_is_on_parent() {
 
 # Run post-merge verification (build + lint) from the parent worktree. Returns
 # 0 if green, 1 if red. Caller invokes reconciler on red.
+#
+# The leading `pnpm install` heals hardlink/.modules.yaml drift introduced when
+# sub-worktrees `cp -al` node_modules and merge back: pnpm's per-workspace
+# install state can end up looking "incomplete" to pnpm even though .bin/ files
+# are physically present, causing `tsc: not found` style failures that the
+# reconciler can't fix. Re-installing rewrites .modules.yaml; with the warm
+# content-addressed store it's seconds.
 sub_worktree_verify_parent() {
     local parent_issue=$1
     local parent_worktree="$WORKTREE_BASE/issue-${parent_issue}"
     local log_file="$HOME/.ralph-gh/runs/issue-${parent_issue}/post-merge-verify-$(date '+%Y%m%d_%H%M%S').log"
     mkdir -p "$(dirname "$log_file")"
 
-    log_status "INFO" "Running post-merge verification (build + lint) in $parent_worktree"
-    if (cd "$parent_worktree" && portable_timeout 900s bash -c 'pnpm build && pnpm lint' < /dev/null > "$log_file" 2>&1); then
+    log_status "INFO" "Running post-merge verification (install + build + lint) in $parent_worktree"
+    if (cd "$parent_worktree" && portable_timeout 900s bash -c 'pnpm install --frozen-lockfile --prefer-offline && pnpm build && pnpm lint' < /dev/null > "$log_file" 2>&1); then
         log_status "SUCCESS" "Post-merge verification green"
         return 0
     fi
