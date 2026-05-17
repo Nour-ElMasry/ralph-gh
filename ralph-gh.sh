@@ -37,6 +37,7 @@ RALPH_GH_MAX_LOOPS_PER_ISSUE="${RALPH_GH_MAX_LOOPS_PER_ISSUE:-8}"  # Max Claude 
 RALPH_GH_MAX_LOOPS_TOTAL="${RALPH_GH_MAX_LOOPS_TOTAL:-0}"          # Max total invocations per parent group (0=unlimited)
 RALPH_GH_MAX_REVIEW_RUNS="${RALPH_GH_MAX_REVIEW_RUNS:-1}"          # Max end-of-group /review-best-practices runs before opening PR
 RALPH_MAX_PARALLEL="${RALPH_MAX_PARALLEL:-1}"                      # Max concurrent sub-workers per parent (1=disable parallelism, default for safety)
+RALPH_PARALLEL_ENABLED="${RALPH_PARALLEL_ENABLED:-0}"              # Master switch for the parallel scheduler (0=serial only, 1=honor RALPH_MAX_PARALLEL + DAG)
 RALPH_RECONCILER_MODEL="${RALPH_RECONCILER_MODEL:-claude-sonnet-4-6}"  # Model for merge reconciliation (cheaper than worker model)
 RALPH_RECONCILER_TIMEOUT_MINUTES="${RALPH_RECONCILER_TIMEOUT_MINUTES:-15}"
 
@@ -180,11 +181,13 @@ process_parent_group() {
     fi
 
     # If the parent has a parallel DAG, hand off to the parallel scheduler.
-    # The serial loop below remains the path for legacy / strictly-serial DAGs.
+    # The serial loop below remains the path for legacy / strictly-serial DAGs,
+    # and is also the path taken when RALPH_PARALLEL_ENABLED=0 (the default).
     if dag_state_active; then
         local dag_json
         dag_json=$(jq -c '.in_progress.dag.raw' "$STATE_FILE" 2>/dev/null)
         if [[ -n "$dag_json" && "$dag_json" != "null" ]] \
+           && [[ "${RALPH_PARALLEL_ENABLED:-0}" == "1" ]] \
            && [[ "${RALPH_MAX_PARALLEL:-1}" -gt 1 ]] \
            && dag_has_parallelism "$dag_json"; then
             log_status "INFO" "Parent #$parent_number uses parallel DAG (max_parallel=$RALPH_MAX_PARALLEL)"
@@ -684,14 +687,18 @@ process_targeted_issue() {
 
         # If the body declares a DAG with parallelism, store it for the scheduler.
         # Strictly-serial DAGs (legacy) are skipped → fall through to serial loop.
-        local dag_json
-        if dag_json=$(parse_task_dag "$body"); then
-            if dag_has_parallelism "$dag_json"; then
-                dag_state_init "$dag_json"
-                log_status "INFO" "DAG with parallelism detected for parent #$issue_number"
+        # When RALPH_PARALLEL_ENABLED=0 (default), the scheduler is never engaged,
+        # so we skip DAG state init entirely and let the serial loop handle subs.
+        if [[ "${RALPH_PARALLEL_ENABLED:-0}" == "1" ]]; then
+            local dag_json
+            if dag_json=$(parse_task_dag "$body"); then
+                if dag_has_parallelism "$dag_json"; then
+                    dag_state_init "$dag_json"
+                    log_status "INFO" "DAG with parallelism detected for parent #$issue_number"
+                fi
+            else
+                log_status "WARN" "DAG parse failed; falling back to serial execution"
             fi
-        else
-            log_status "WARN" "DAG parse failed; falling back to serial execution"
         fi
     fi
 
@@ -797,15 +804,18 @@ poll_and_process() {
         set_in_progress "$num" "$branch_name" "${valid_sub_array[@]}"
         log_status "SUCCESS" "Set up work for parent #$num with ${#valid_sub_array[@]} sub-issues"
 
-        # Initialize DAG state if the body declares parallelism
-        local dag_json
-        if dag_json=$(parse_task_dag "$body"); then
-            if dag_has_parallelism "$dag_json"; then
-                dag_state_init "$dag_json"
-                log_status "INFO" "DAG with parallelism detected for parent #$num"
+        # Initialize DAG state only when the parallel scheduler is enabled.
+        # Otherwise the serial loop handles subs in declaration order.
+        if [[ "${RALPH_PARALLEL_ENABLED:-0}" == "1" ]]; then
+            local dag_json
+            if dag_json=$(parse_task_dag "$body"); then
+                if dag_has_parallelism "$dag_json"; then
+                    dag_state_init "$dag_json"
+                    log_status "INFO" "DAG with parallelism detected for parent #$num"
+                fi
+            else
+                log_status "WARN" "DAG parse failed for parent #$num; falling back to serial execution"
             fi
-        else
-            log_status "WARN" "DAG parse failed for parent #$num; falling back to serial execution"
         fi
 
         update_last_poll

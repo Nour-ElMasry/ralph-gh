@@ -26,3 +26,15 @@ RALPH_GH_MAX_LOOPS_TOTAL=0              # Max total invocations per parent group
 # Circuit breaker thresholds
 CB_NO_PROGRESS_THRESHOLD=3               # Open after N sub-issues with no progress
 CB_SAME_ERROR_THRESHOLD=5                # Open after N repeated errors
+
+# Parallel execution (experimental — disabled by default)
+# When 0, every parent runs its sub-issues serially regardless of any
+# `max_parallel` field declared in the PRD DAG. When 1, parents whose DAG
+# declares parallelism and whose RALPH_MAX_PARALLEL is >1 will hand off to
+# the parallel scheduler (lib/parallel_orchestrator.sh).
+# Known issue: env-dependent post-merge verify (e.g. Next.js builds reading
+# gitignored .env files) can cascade-fail across parallel sub-worktrees, which
+# is why the default is off. Re-enable only if your post-merge gate is
+# environment-independent.
+RALPH_PARALLEL_ENABLED=0
+RALPH_MAX_PARALLEL=1                     # Honored only when RALPH_PARALLEL_ENABLED=1
