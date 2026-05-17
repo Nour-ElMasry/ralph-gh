@@ -399,6 +399,17 @@ _spawn_up_to_capacity() {
         fi
         [[ -z "$next" ]] && break
 
+        # Skip subs carrying the configured hold label. The sub is routed into
+        # the held bucket (merged-for-dependency-purposes) so dependents promote
+        # and run anyway — the user explicitly chose "skip the sub, run
+        # dependents anyway" semantic. The parent-completion path checks
+        # has_held_subs and diverts to the partial-PR flow.
+        if issue_has_skip_label "$RALPH_GH_REPO" "$next"; then
+            log_status "INFO" "Skipping sub #$next — has hold label '$RALPH_GH_SKIP_LABEL'"
+            with_dag_state_lock mark_sub_held "$next"
+            continue
+        fi
+
         # Set up sub-worktree against the CURRENT parent branch tip (so the
         # newly-merged dependency commits are included).
         if ! sub_worktree_setup "$parent_issue" "$next" "$parent_branch"; then

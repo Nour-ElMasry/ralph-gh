@@ -76,7 +76,8 @@ set_in_progress() {
             "parent": $parent,
             "branch": $branch,
             "completed_subs": [],
-            "remaining_subs": $remaining
+            "remaining_subs": $remaining,
+            "held_subs": []
         } | .last_poll = $ts')
 
     save_state "$state"
@@ -105,6 +106,45 @@ get_remaining_subs() {
 # Get completed sub-issues
 get_completed_subs() {
     jq -r '.in_progress.completed_subs[]' "$STATE_FILE" 2>/dev/null
+}
+
+# Mark a sub-issue as held (deferred for human review via skip-label).
+# Removes from remaining_subs (so the serial loop won't re-pick), adds to
+# held_subs, and — if a DAG is active — moves the sub into the `merged` bucket
+# so dependents promote. The held sub is NOT added to completed_subs, so
+# complete_group won't close it or tick its checkbox.
+mark_sub_held() {
+    local sub_number=$1
+
+    local state
+    state=$(load_state) || { log_status "ERROR" "Failed to load state for mark_sub_held"; return 1; }
+
+    local new_state
+    new_state=$(echo "$state" | jq \
+        --argjson sub "$sub_number" \
+        '.in_progress.held_subs       = ((.in_progress.held_subs // []) + [$sub] | unique)
+       | .in_progress.remaining_subs -= [$sub]
+       | if (.in_progress.dag // null) != null then
+             .in_progress.dag.ready   -= [$sub]
+           | .in_progress.dag.running -= [$sub]
+           | .in_progress.dag.blocked -= [$sub]
+           | .in_progress.dag.merged   = ((.in_progress.dag.merged // []) + [$sub] | unique)
+         else .
+         end') || { log_status "ERROR" "jq failed in mark_sub_held"; return 1; }
+
+    save_state "$new_state"
+}
+
+# Get held sub-issues (skip-labeled, deferred this run).
+get_held_subs() {
+    jq -r '.in_progress.held_subs[]?' "$STATE_FILE" 2>/dev/null
+}
+
+# True if any sub-issue has been held this run.
+has_held_subs() {
+    local count
+    count=$(jq -r '(.in_progress.held_subs // []) | length' "$STATE_FILE" 2>/dev/null)
+    [[ -n "$count" && "$count" != "0" ]]
 }
 
 # Get the parent issue number from in_progress
@@ -326,6 +366,7 @@ with_dag_state_lock() {
 export -f init_state load_state save_state
 export -f has_in_progress set_in_progress
 export -f mark_sub_complete get_remaining_subs get_completed_subs
+export -f mark_sub_held get_held_subs has_held_subs
 export -f get_in_progress_parent get_in_progress_branch
 export -f mark_parent_processed clear_in_progress is_processed clear_processed
 export -f update_last_poll

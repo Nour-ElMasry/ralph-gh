@@ -13,8 +13,33 @@ poll_for_parent_issues() {
         --label "$label" \
         --state open \
         --limit 50 \
-        --json number,title,body,createdAt \
+        --json number,title,body,createdAt,labels \
         --jq 'sort_by(.createdAt)' < /dev/null 2>/dev/null
+}
+
+# True if the given issue carries the configured skip label. No-ops to false
+# when RALPH_GH_SKIP_LABEL is empty so callers can call unconditionally.
+# Used by the targeted-run path, the legacy serial loop, and the parallel
+# orchestrator — all places where we need a single-issue label check
+# without having the parent-poll JSON to read from.
+issue_has_skip_label() {
+    local repo=$1
+    local issue_number=$2
+
+    [[ -z "${RALPH_GH_SKIP_LABEL:-}" ]] && return 1
+
+    local labels_json
+    labels_json=$(gh issue view "$issue_number" \
+        --repo "$repo" \
+        --json labels < /dev/null 2>/dev/null) || return 1
+    [[ -z "$labels_json" ]] && return 1
+
+    local hit
+    hit=$(echo "$labels_json" \
+        | jq -r --arg skip "$RALPH_GH_SKIP_LABEL" \
+            '[.labels[].name] | index($skip)' 2>/dev/null)
+
+    [[ -n "$hit" && "$hit" != "null" ]]
 }
 
 # Parse task list from issue body
@@ -273,4 +298,4 @@ fetch_issue_details() {
 export -f poll_for_parent_issues parse_task_list parse_completed_tasks
 export -f get_issue_title get_issue_body fetch_issue_details gh_retry
 export -f close_sub_issue check_off_sub_issue remove_label comment_on_issue
-export -f check_github_available validate_sub_issues
+export -f check_github_available validate_sub_issues issue_has_skip_label

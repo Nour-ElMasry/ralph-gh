@@ -6,6 +6,12 @@
 
 # Optional (defaults shown)
 RALPH_GH_LABEL="ralph"                    # Label that triggers automation
+RALPH_GH_SKIP_LABEL=""                    # Optional hold label (HITL). Issues with this label
+                                           # are deferred: parents are skipped at poll time, held
+                                           # sub-issues do not block their dependents (those run
+                                           # anyway), and the parent is left open with the held
+                                           # slice unchecked so a future run can resume it after
+                                           # a human removes the label. Empty = feature disabled.
 RALPH_GH_MAIN_BRANCH="main"              # Base branch for PRs
 CLAUDE_TIMEOUT_MINUTES=15                 # Max time per sub-issue
 

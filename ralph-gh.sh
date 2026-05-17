@@ -27,6 +27,7 @@ source "$SCRIPT_DIR/lib/parallel_orchestrator.sh"
 RALPH_GH_REPO="${RALPH_GH_REPO:-}"
 RALPH_GH_WORKSPACE="${RALPH_GH_WORKSPACE:-}"
 RALPH_GH_LABEL="${RALPH_GH_LABEL:-ralph}"
+RALPH_GH_SKIP_LABEL="${RALPH_GH_SKIP_LABEL:-}"  # Hold label (HITL). Empty disables the feature.
 RALPH_GH_MAIN_BRANCH="${RALPH_GH_MAIN_BRANCH:-main}"
 CLAUDE_TIMEOUT_MINUTES="${CLAUDE_TIMEOUT_MINUTES:-15}"
 RALPH_GH_ALLOWED_TOOLS="${RALPH_GH_ALLOWED_TOOLS:-Write,Read,Edit,Bash(git add *),Bash(git commit *),Bash(git diff *),Bash(git log *),Bash(git status),Bash(git status *),Bash(git push *),Bash(git pull *),Bash(git fetch *),Bash(git checkout *),Bash(git branch *),Bash(git stash *),Bash(git merge *),Bash(git tag *),Bash(npm *),Bash(pnpm *),Bash(node *),Bash(find *)}"
@@ -215,6 +216,15 @@ process_parent_group() {
 
         if [[ -z "$sub_number" ]]; then
             break
+        fi
+
+        # Hold gate: subs carrying the skip label are deferred this run. The
+        # sub stays open + unchecked; complete_group sees has_held_subs and
+        # diverts to the partial-PR path (label kept, parent left open).
+        if issue_has_skip_label "$RALPH_GH_REPO" "$sub_number"; then
+            log_status "INFO" "Skipping sub #$sub_number — has hold label '$RALPH_GH_SKIP_LABEL'"
+            mark_sub_held "$sub_number"
+            continue
         fi
 
         # If this is the only sub remaining, the model also creates the changeset
@@ -423,6 +433,18 @@ complete_group() {
     local parent_number=$1
     local branch_name=$2
 
+    # If any sub was held for human review this run, divert to the partial-PR
+    # flow instead of the normal closure. The held sub stays open + unchecked;
+    # the parent keeps its `ralph` label so a future run can resume after the
+    # human removes the hold label.
+    if has_held_subs; then
+        local held_list
+        held_list=$(get_held_subs | sed 's/^/#/' | tr '\n' ' ' | sed 's/ $//')
+        log_status "WARN" "Parent #$parent_number has held sub(s): $held_list — opening partial PR"
+        complete_group_with_held "$parent_number" "$branch_name" "$held_list"
+        return $?
+    fi
+
     log_status "SUCCESS" "All sub-issues for parent #$parent_number completed!"
 
     # Push branch
@@ -498,6 +520,69 @@ complete_group() {
     else
         log_status "WARN" "Parent #$parent_number: PR opened with no completed sub-issues to close. Manual triage needed."
     fi
+}
+
+# Complete a parent group that has held (skip-labeled) sub-issues:
+#   - push the work that did run, open a DRAFT PR (not ready-to-merge)
+#   - check off + close completed subs (they shipped — same as normal closure)
+#   - leave held subs open and unchecked
+#   - KEEP the `ralph` label on the parent so a future run picks it back up
+#     after a human removes the hold label
+#   - comment on the parent so the human knows what's pending
+complete_group_with_held() {
+    local parent_number=$1
+    local branch_name=$2
+    local held_list=$3
+
+    # Push branch (best-effort — draft PR is still useful even on push hiccups)
+    if ! push_branch "$branch_name"; then
+        log_status "WARN" "Failed to push branch $branch_name; continuing to record held state"
+    fi
+
+    local parent_title
+    parent_title=$(get_issue_title "$RALPH_GH_REPO" "$parent_number") || parent_title=""
+    [[ -z "$parent_title" ]] && parent_title="Issue $parent_number"
+
+    local completed_list
+    completed_list=$(build_completed_subs_list) || completed_list="(could not build list)"
+
+    log_status "INFO" "Opening draft PR for #$parent_number (held: $held_list)..."
+    open_draft_pr "$RALPH_GH_REPO" "$branch_name" "$RALPH_GH_MAIN_BRANCH" \
+        "$parent_number" "$parent_title" "$completed_list" \
+        "Sub-issue(s) $held_list carry the hold label '$RALPH_GH_SKIP_LABEL' and were deferred. The \`$RALPH_GH_LABEL\` label has been kept so ralph re-picks this parent once the hold is removed." || true
+
+    # Close + tick the subs that actually shipped. Held subs are excluded
+    # because they were never added to completed_subs.
+    local subs_to_close closed_count=0
+    subs_to_close=$(printf '%s\n%s\n' \
+        "$(get_completed_subs 2>/dev/null)" \
+        "$(_completed_subs_from_branch 2>/dev/null)" \
+        | grep -E '^[0-9]+$' \
+        | sort -un)
+    while IFS= read -r sub; do
+        [[ -z "$sub" ]] && continue
+        log_status "INFO" "Closing sub-issue #$sub"
+        close_sub_issue "$RALPH_GH_REPO" "$sub" \
+            "Completed by ralph-gh as part of parent issue #$parent_number (partial run — sibling subs held for review)" || true
+        closed_count=$((closed_count + 1))
+    done <<< "$subs_to_close"
+
+    comment_on_issue "$RALPH_GH_REPO" "$parent_number" \
+        "ralph-gh deferred sub-issue(s) $held_list because they carry the hold label \`$RALPH_GH_SKIP_LABEL\`.
+
+A draft PR has been opened with the work that did complete. The \`$RALPH_GH_LABEL\` label is intentionally **kept** so a future \`ralph-gh run\` picks this parent back up once the hold label is removed.
+
+**Held (open, unchecked):** $held_list
+**Completed sub-issues:**
+$completed_list" || true
+
+    # Clear in_progress and mark processed for THIS run only — keeps the
+    # label so the next run re-triggers (mirrors abort_group's behavior).
+    clear_in_progress
+    mark_parent_processed "$parent_number"
+
+    log_status "WARN" "Parent #$parent_number: $closed_count shipped, held $held_list. Label kept for resume."
+    return 0
 }
 
 # Abort a parent group: push partial work, draft PR, comment
@@ -630,6 +715,27 @@ poll_and_process() {
         return 1
     fi
 
+    # Drop parents carrying the hold label. Done client-side off the poll JSON
+    # (labels are already on each element) so this costs zero extra gh calls.
+    if [[ -n "${RALPH_GH_SKIP_LABEL:-}" ]]; then
+        local before after held_count
+        before=$(echo "$issues_json" | jq 'length')
+        issues_json=$(echo "$issues_json" | jq \
+            --arg skip "$RALPH_GH_SKIP_LABEL" \
+            'map(select(([.labels[].name] | index($skip)) == null))')
+        after=$(echo "$issues_json" | jq 'length')
+        held_count=$((before - after))
+        if (( held_count > 0 )); then
+            log_status "INFO" "Skipped $held_count parent(s) with hold label '$RALPH_GH_SKIP_LABEL'"
+        fi
+    fi
+
+    if [[ "$issues_json" == "[]" ]]; then
+        log_status "INFO" "No eligible issues after skip-label filter"
+        update_last_poll
+        return 1
+    fi
+
     # Filter out already-processed issues and find a ready candidate
     local candidate_count
     candidate_count=$(echo "$issues_json" | jq 'length')
@@ -720,6 +826,12 @@ poll_and_process() {
 process_targeted_in_worktree() {
     local issue_number=$1
 
+    # Hold gate: explicit-run still honors the skip label (one source of truth).
+    if issue_has_skip_label "$RALPH_GH_REPO" "$issue_number"; then
+        log_status "INFO" "Skipping targeted #$issue_number — has hold label '$RALPH_GH_SKIP_LABEL'"
+        return 0
+    fi
+
     log_status "INFO" "Setting up worktree for issue #$issue_number..."
 
     # Set up worktree (creates it, acquires per-issue lock, redirects globals, cd's into it)
@@ -776,6 +888,7 @@ run_command() {
 
     # Apply CLI --label override after config loading
     [[ -n "${_LABEL_OVERRIDE:-}" ]] && RALPH_GH_LABEL="$_LABEL_OVERRIDE"
+    [[ -n "${_SKIP_LABEL_OVERRIDE:-}" ]] && RALPH_GH_SKIP_LABEL="$_SKIP_LABEL_OVERRIDE"
 
     # Validate environment
     validate_environment
@@ -807,6 +920,7 @@ run_command() {
     log_status "INFO" "Workspace: $RALPH_GH_WORKSPACE"
     log_status "INFO" "Repo: $RALPH_GH_REPO"
     log_status "INFO" "Label: $RALPH_GH_LABEL"
+    log_status "INFO" "Skip label: ${RALPH_GH_SKIP_LABEL:-(none)}"
     log_status "INFO" "Main branch: $RALPH_GH_MAIN_BRANCH"
 
     # Resume in-progress work if any (crash recovery)
@@ -857,9 +971,18 @@ case "${1:-}" in
                         exit 1
                     fi
                     ;;
+                --skip-label)
+                    if [[ -n "${2:-}" ]]; then
+                        _SKIP_LABEL_OVERRIDE="$2"
+                        shift 2
+                    else
+                        echo "Error: --skip-label requires a value"
+                        exit 1
+                    fi
+                    ;;
                 -*)
                     echo "Unknown option: $1"
-                    echo "Usage: ralph-gh run [--label LABEL] [ISSUE_NUMBER ...]"
+                    echo "Usage: ralph-gh run [--label LABEL] [--skip-label LABEL] [ISSUE_NUMBER ...]"
                     exit 1
                     ;;
                 *)
@@ -944,14 +1067,14 @@ case "${1:-}" in
     --help|-h|"")
         echo "ralph-gh - Autonomous GitHub Issue Worker"
         echo ""
-        echo "Usage: cd <your-repo> && ralph-gh run [--label LABEL] [ISSUE_NUMBER ...]"
+        echo "Usage: cd <your-repo> && ralph-gh run [--label LABEL] [--skip-label LABEL] [ISSUE_NUMBER ...]"
         echo ""
         echo "  Repo and workspace are auto-detected from the current directory."
         echo "  Just cd into any git repo with a GitHub remote and run."
         echo ""
         echo "Commands:"
-        echo "  setup [OWNER/REPO]               Create 'ralph' label (auto-detects repo)"
-        echo "  run [--label LABEL] [ISSUE ...]  Process issues and exit"
+        echo "  setup [OWNER/REPO]                              Create 'ralph' label (auto-detects repo)"
+        echo "  run [--label L] [--skip-label L] [ISSUE ...]    Process issues and exit"
         echo ""
         echo "  When issue numbers are given, ralph works on those specific issues"
         echo "  (no label required) in isolated git worktrees. Without issue numbers,"
@@ -970,6 +1093,7 @@ case "${1:-}" in
         echo ""
         echo "Environment variables:"
         echo "  RALPH_GH_LABEL             Issue label to watch (default: ralph)"
+        echo "  RALPH_GH_SKIP_LABEL        Hold label — issues with this label are deferred (default: empty / disabled)"
         echo "  RALPH_GH_MAIN_BRANCH       Base branch (default: main)"
         echo "  CLAUDE_TIMEOUT_MINUTES     Max time per sub-issue (default: 15)"
         echo "  RALPH_GH_REPO              Override auto-detected repo (deprecated)"
