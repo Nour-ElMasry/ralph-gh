@@ -303,6 +303,17 @@ process_parent_group() {
                 "$retry_context" \
                 "$is_last_sub" || result=$?
 
+            # Terminal block (return 2): the model set EXIT_SIGNAL: true alongside
+            # STATUS: BLOCKED — a deliberate escalation, not a transient failure.
+            # Do NOT record a no-progress result (keep the circuit breaker clean);
+            # hand the sub off to a human and finalize the group gracefully.
+            if [[ $result -eq 2 ]]; then
+                local block_rec
+                block_rec=$(get_last_recommendation)
+                defer_sub_for_human "$parent_number" "$branch_name" "$sub_number" "$block_rec"
+                return 0
+            fi
+
             if [[ $result -ne 0 ]]; then
                 record_result "false" "true"
                 if ! can_execute; then
@@ -586,6 +597,45 @@ $completed_list" || true
 
     log_status "WARN" "Parent #$parent_number: $closed_count shipped, held $held_list. Label kept for resume."
     return 0
+}
+
+# A sub-issue reported a terminal block (STATUS: BLOCKED + EXIT_SIGNAL: true):
+# a deliberate escalation that retrying cannot clear. Preserve committed work,
+# flag the sub for a human, and finalize the parent gracefully — crucially
+# WITHOUT recording a no-progress result, so a legitimate block never trips the
+# circuit breaker (a block is a decision, not a crash).
+defer_sub_for_human() {
+    local parent_number=$1
+    local branch_name=$2
+    local sub_number=$3
+    local recommendation=$4
+
+    log_status "WARN" "Sub-issue #$sub_number: terminal block (EXIT_SIGNAL) — deferring for human review, not retrying"
+
+    # Commit any stray uncommitted work so the draft PR carries everything done.
+    git add -A 2>/dev/null || true
+    git commit -m "wip(ralph): work on #$sub_number before human handoff" 2>/dev/null || true
+
+    comment_on_issue "$RALPH_GH_REPO" "$sub_number" \
+        "ralph-gh stopped here: this sub-issue reported a **terminal block** (\`EXIT_SIGNAL: true\`). Retrying won't clear it — a human decision is needed.
+
+**Model recommendation:**
+${recommendation:-(none provided)}
+
+This sub-issue has been flagged for review. Resolve the blocker, then re-trigger parent #$parent_number." || true
+
+    # Route into the existing HITL hold flow when a hold label is configured:
+    # label the sub so future runs defer it, then finalize as a held group
+    # (draft PR, parent label kept for resume). Without a hold label, fall back
+    # to a graceful abort that still preserves the work and keeps the label.
+    if [[ -n "${RALPH_GH_SKIP_LABEL:-}" ]]; then
+        add_label "$RALPH_GH_REPO" "$sub_number" "$RALPH_GH_SKIP_LABEL" || \
+            log_status "WARN" "Could not add hold label '$RALPH_GH_SKIP_LABEL' to #$sub_number"
+        complete_group_with_held "$parent_number" "$branch_name" "#$sub_number"
+    else
+        abort_group "$parent_number" "$branch_name" \
+            "Sub-issue #$sub_number reported a terminal block (EXIT_SIGNAL: true) and needs a human decision: ${recommendation:-see issue}"
+    fi
 }
 
 # Abort a parent group: push partial work, draft PR, comment

@@ -209,6 +209,17 @@ remove_label() {
         --remove-label "$label" < /dev/null 2>/dev/null
 }
 
+# Add a label to an issue
+add_label() {
+    local repo=$1
+    local issue_number=$2
+    local label=$3
+
+    gh issue edit "$issue_number" \
+        --repo "$repo" \
+        --add-label "$label" < /dev/null 2>/dev/null
+}
+
 # Add a comment to an issue
 comment_on_issue() {
     local repo=$1
@@ -297,5 +308,5 @@ fetch_issue_details() {
 
 export -f poll_for_parent_issues parse_task_list parse_completed_tasks
 export -f get_issue_title get_issue_body fetch_issue_details gh_retry
-export -f close_sub_issue check_off_sub_issue remove_label comment_on_issue
+export -f close_sub_issue check_off_sub_issue remove_label add_label comment_on_issue
 export -f check_github_available validate_sub_issues issue_has_skip_label

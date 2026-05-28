@@ -110,6 +110,18 @@ _spawn_sub_worker() {
                 "$retry_context" \
                 "false" || r=$?
 
+            # Terminal block (return 2): EXIT_SIGNAL: true — a deliberate
+            # escalation, not a transient failure. Stop retrying instead of
+            # looping until the circuit breaker trips, and don't record a
+            # no-progress result. NOTE: the reaper maps any non-zero worker exit
+            # to the DAG "failed" state; routing blocks into a dedicated
+            # human-hold state in parallel mode is future work.
+            if [[ $r -eq 2 ]]; then
+                log_status "WARN" "Sub #$sub_issue: terminal block (EXIT_SIGNAL) — not retrying"
+                result=2
+                break
+            fi
+
             if [[ $r -ne 0 ]]; then
                 record_result "false" "true"
                 retry_context="Previous Claude invocation failed or produced no changes. Re-read the acceptance criteria and try again."

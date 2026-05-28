@@ -264,6 +264,17 @@ execute_for_sub_issue() {
         elif echo "$result_text" | grep -q "STATUS: BLOCKED"; then
             response_status="BLOCKED"
             log_status "WARN" "Claude reported BLOCKED for sub-issue #$sub_issue_number"
+            # EXIT_SIGNAL: true is a deliberate, terminal escalation — the model
+            # has decided it cannot proceed without a human/orchestrator
+            # decision (e.g. out-of-scope or environmental blocker). Retrying
+            # cannot clear it, so return 2 ("terminal block") to tell the caller
+            # to stop looping instead of treating it as a transient failure and
+            # burning the circuit breaker. A BLOCKED without EXIT_SIGNAL is
+            # treated as before (retryable) via return 1.
+            if echo "$result_text" | grep -qE "EXIT_SIGNAL:[[:space:]]*true"; then
+                log_status "WARN" "Sub-issue #$sub_issue_number: EXIT_SIGNAL set — terminal block, will not retry"
+                return 2
+            fi
             return 1
         fi
     fi
@@ -294,6 +305,29 @@ get_saved_session_id() {
 # Clear saved session (for starting fresh with a new parent group)
 clear_saved_session() {
     rm -f "$RALPH_GH_STATE_DIR/.claude_session_id"
+}
+
+# Echo the RECOMMENDATION line from the most recent Claude RALPH_STATUS block
+# (empty if absent). Used to surface a terminal block's rationale to the human
+# on handoff. Always exits 0 so callers under `set -e` stay safe.
+get_last_recommendation() {
+    local path_file="$RALPH_GH_STATE_DIR/.last_claude_output_path"
+    [[ -f "$path_file" ]] || return 0
+    local output_file
+    output_file=$(cat "$path_file")
+    [[ -f "$output_file" ]] || return 0
+
+    local result_text
+    if jq -e 'type == "array"' "$output_file" > /dev/null 2>&1; then
+        result_text=$(jq -r '[.[] | select(.type == "result")] | .[-1].result // ""' "$output_file" 2>/dev/null)
+    else
+        result_text=$(jq -r '.result // ""' "$output_file" 2>/dev/null)
+    fi
+
+    echo "$result_text" \
+        | grep -E "^[[:space:]]*RECOMMENDATION:" \
+        | head -1 \
+        | sed -E 's/^[[:space:]]*RECOMMENDATION:[[:space:]]*//' || true
 }
 
 # =============================================================================
@@ -536,6 +570,6 @@ execute_review() {
 
 export -f build_full_prompt execute_for_sub_issue
 export -f build_review_prompt execute_review
-export -f get_saved_session_id clear_saved_session
+export -f get_saved_session_id clear_saved_session get_last_recommendation
 export -f run_acceptance_gate
 export -f run_e2e_pre_check
