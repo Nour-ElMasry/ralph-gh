@@ -200,6 +200,10 @@ execute_for_sub_issue() {
         < /dev/null > "$output_file" 2>"$stderr_file"
     exit_code=$?
 
+    # The CLI is dead (exited or killed) — anything still running in the
+    # worktree is an orphan of this invocation and would poison the next loop.
+    reap_workspace_orphans "$workspace"
+
     # Save path for downstream gate functions (run_acceptance_gate reads this)
     echo "$output_file" > "$RALPH_GH_STATE_DIR/.last_claude_output_path"
 
@@ -544,6 +548,8 @@ execute_review() {
     portable_timeout "${timeout_seconds}s" "${cmd_args[@]}" \
         < /dev/null > "$output_file" 2>/dev/null
     exit_code=$?
+
+    reap_workspace_orphans "$workspace"
 
     if [[ $exit_code -eq 124 ]]; then
         log_status "WARN" "Review timed out after ${timeout_minutes} minutes"

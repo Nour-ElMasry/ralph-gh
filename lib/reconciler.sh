@@ -93,6 +93,8 @@ reconcile_merge() {
     )
     exit_code=$?
 
+    reap_workspace_orphans "$parent_worktree"
+
     if [[ $exit_code -eq 124 ]]; then
         log_status "WARN" "Reconciler timed out after ${timeout_minutes}m"
         return 1

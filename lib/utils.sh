@@ -49,5 +49,45 @@ portable_timeout() {
     fi
 }
 
+# Kill orphaned processes still rooted in a workspace directory.
+# `portable_timeout` signals only the Claude CLI process; shells and test
+# runners it spawned (backgrounded jest, dev servers) get reparented to init
+# and keep running — contending for the worktree's test database and poisoning
+# every subsequent loop (#894 postmortem: orphaned jest runs made three
+# 45-minute loops in a row look hung). Anything whose CWD is inside the
+# workspace after the CLI died is such an orphan, except this script's own
+# process chain, which cd'd into the worktree itself.
+# Linux /proc only; silently a no-op elsewhere (macOS).
+reap_workspace_orphans() {
+    local workspace=$1
+    [[ -n "$workspace" && -d "$workspace" && -d /proc ]] || return 0
+
+    local protected=" $$ $PPID "
+    local p=$PPID
+    while [[ -n "$p" && "$p" != "0" && "$p" != "1" ]]; do
+        p=$(grep -s '^PPid:' "/proc/$p/status" | awk '{print $2}')
+        [[ -n "$p" ]] && protected+=" $p "
+    done
+
+    local pid_dir pid cwd victims=""
+    for pid_dir in /proc/[0-9]*; do
+        pid="${pid_dir##*/}"
+        [[ "$protected" == *" $pid "* ]] && continue
+        cwd=$(readlink "$pid_dir/cwd" 2>/dev/null) || continue
+        if [[ "$cwd" == "$workspace" || "$cwd" == "$workspace"/* ]]; then
+            victims+=" $pid"
+        fi
+    done
+    [[ -z "$victims" ]] && return 0
+
+    log_status "WARN" "Reaping orphaned process(es) still running in $workspace:$victims"
+    # shellcheck disable=SC2086  # word splitting of the pid list is intended
+    kill -TERM $victims 2>/dev/null || true
+    sleep 2
+    kill -KILL $victims 2>/dev/null || true
+    return 0
+}
+
 export -f log_status
 export -f portable_timeout
+export -f reap_workspace_orphans

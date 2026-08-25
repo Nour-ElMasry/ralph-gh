@@ -919,8 +919,8 @@ process_targeted_in_worktree() {
         process_targeted_issue "$issue_number" || result=$?
     fi
 
-    # Clean up worktree regardless of success/failure
-    worktree_cleanup "$issue_number"
+    # Clean up worktree regardless of success/failure (failure archives logs)
+    worktree_cleanup "$issue_number" "$([[ $result -eq 0 ]] && echo success || echo failure)"
 
     # Restore default signal trap
     trap 'log_status "WARN" "Caught signal, shutting down..."; kill 0 2>/dev/null; exit 130' INT TERM

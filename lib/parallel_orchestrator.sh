@@ -220,7 +220,7 @@ _reap_finished_workers() {
         # whole budget (see RALPH_RECONCILE_GIVE_UP_AFTER).
         local merge_result=0
         with_dag_state_lock _merge_one_sub "$parent_issue" "$sub" "$parent_branch" || merge_result=$?
-        sub_worktree_cleanup "$parent_issue" "$sub"
+        sub_worktree_cleanup "$parent_issue" "$sub" "success"
     done <<< "$(dag_state_running_subs)"
 
     echo "$reaped"

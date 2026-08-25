@@ -49,6 +49,10 @@ worktree_setup() {
         _worktree_create "$worktree_dir" "$branch_name" "$main_branch"
     fi
 
+    # Untracked env files don't materialise via `git worktree add`; test
+    # suites need them (see _copy_untracked_env_files).
+    _copy_untracked_env_files "$_RALPH_MAIN_WORKSPACE" "$worktree_dir"
+
     # Redirect state globals to an EXTERNAL directory (outside the worktree).
     # Keeping state inside the worktree meant Claude could wipe it by running
     # `git clean -fdx`, `pnpm clean`, or similar during a sub-issue — causing
@@ -64,6 +68,36 @@ worktree_setup() {
     cd "$worktree_dir"
     log_status "SUCCESS" "Worktree ready at $worktree_dir (state at $RALPH_GH_STATE_DIR)"
     return 0
+}
+
+# Copy untracked env files (.env, apps/*/.env, ...) from a source checkout
+# into a worktree. `git worktree add` materialises tracked files only, so a
+# fresh worktree is missing every gitignored .env — and e.g. lead-formz's
+# integration specs boot the full AppModule, which reads apps/api/.env at
+# Nest boot (#894 postmortem: the missing file crashed module init mid-suite
+# and left jest hanging on open handles).
+_copy_untracked_env_files() {
+    local src=$1
+    local dst=$2
+    local copied=0
+
+    local f rel
+    while IFS= read -r f; do
+        rel="${f#$src/}"
+        # Skip tracked files (e.g. .env.example): they came with the checkout,
+        # and overwriting them would dirty the worktree.
+        if git -C "$src" ls-files --error-unmatch "$rel" &>/dev/null; then
+            continue
+        fi
+        if [[ ! -e "$dst/$rel" ]]; then
+            mkdir -p "$dst/$(dirname "$rel")"
+            cp "$f" "$dst/$rel" 2>/dev/null && copied=$((copied + 1))
+        fi
+    done < <(find "$src" -maxdepth 3 \( -name node_modules -o -name .git -o -name .ralph-workers \) -prune -o -type f -name '.env*' -print 2>/dev/null)
+
+    if (( copied > 0 )); then
+        log_status "INFO" "Copied $copied untracked env file(s) into $dst"
+    fi
 }
 
 # Internal: create a new worktree, handling branch-exists scenarios
@@ -91,6 +125,10 @@ _worktree_create() {
 # Clean up a worktree after PR creation (success path)
 worktree_cleanup() {
     local issue_number=$1
+    # "success" deletes logs as before; anything else archives them first — an
+    # aborted run's logs are the postmortem evidence, and the abort path used
+    # to print "full log at <path>" and then delete that very path (#894).
+    local outcome=${2:-failure}
 
     local worktree_dir="$WORKTREE_BASE/issue-${issue_number}"
     local state_dir="$HOME/.ralph-gh/runs/issue-${issue_number}"
@@ -100,12 +138,20 @@ worktree_cleanup() {
 
     # Remove the worktree
     if [[ -d "$worktree_dir" ]]; then
+        reap_workspace_orphans "$worktree_dir"
         log_status "INFO" "Cleaning up worktree at $worktree_dir"
         git -C "$_RALPH_MAIN_WORKSPACE" worktree remove "$worktree_dir" --force 2>/dev/null || rm -rf "$worktree_dir"
     fi
 
     # Remove the external state dir for this issue (logs + state.json)
     if [[ -d "$state_dir" ]]; then
+        if [[ "$outcome" != "success" && -d "$state_dir/logs" ]]; then
+            local archive_dir="$HOME/.ralph-gh/archive/issue-${issue_number}-$(date '+%Y%m%d_%H%M%S')"
+            mkdir -p "$archive_dir"
+            if mv "$state_dir/logs" "$archive_dir/logs" 2>/dev/null; then
+                log_status "INFO" "Archived run logs to $archive_dir/logs"
+            fi
+        fi
         log_status "INFO" "Cleaning up state dir at $state_dir"
         rm -rf "$state_dir"
     fi
@@ -212,6 +258,10 @@ sub_worktree_setup() {
         fi
     done < <(find "$parent_worktree" -maxdepth 4 -type d -name node_modules ! -path "$parent_worktree/node_modules" 2>/dev/null)
 
+    # Untracked env files don't materialise via `git worktree add`; test
+    # suites need them (see _copy_untracked_env_files).
+    _copy_untracked_env_files "$parent_worktree" "$sub_worktree"
+
     # Manifest lives outside the worktree so `git clean` can't wipe it.
     local sub_state_dir="$HOME/.ralph-gh/runs/issue-${parent_issue}/sub-${sub_issue}"
     mkdir -p "$sub_state_dir/logs"
@@ -233,6 +283,8 @@ EOF
 sub_worktree_cleanup() {
     local parent_issue=$1
     local sub_issue=$2
+    # Same contract as worktree_cleanup: non-"success" archives the logs.
+    local outcome=${3:-failure}
 
     local parent_worktree="$WORKTREE_BASE/issue-${parent_issue}"
     local sub_worktree="$parent_worktree/sub-${sub_issue}"
@@ -240,6 +292,7 @@ sub_worktree_cleanup() {
     local sub_branch="ralph/issue-${parent_issue}-${sub_issue}"
 
     if [[ -d "$sub_worktree" ]]; then
+        reap_workspace_orphans "$sub_worktree"
         git -C "$parent_worktree" worktree remove "$sub_worktree" --force 2>/dev/null || rm -rf "$sub_worktree"
     fi
     # Delete the sub-branch: on success its work is captured by the squash
@@ -248,6 +301,12 @@ sub_worktree_cleanup() {
     # branch is unmerged from git's POV (squash != merge).
     if git -C "$_RALPH_MAIN_WORKSPACE" show-ref --verify --quiet "refs/heads/$sub_branch" 2>/dev/null; then
         git -C "$_RALPH_MAIN_WORKSPACE" branch -D "$sub_branch" 2>/dev/null || true
+    fi
+    if [[ "$outcome" != "success" && -d "$sub_state_dir/logs" ]]; then
+        local archive_dir="$HOME/.ralph-gh/archive/issue-${parent_issue}-sub-${sub_issue}-$(date '+%Y%m%d_%H%M%S')"
+        mkdir -p "$archive_dir"
+        mv "$sub_state_dir/logs" "$archive_dir/logs" 2>/dev/null && \
+            log_status "INFO" "Archived sub-worker logs to $archive_dir/logs"
     fi
     rm -rf "$sub_state_dir" 2>/dev/null || true
 }
