@@ -19,6 +19,9 @@ source "$SCRIPT_DIR/lib/issue_worker.sh"
 source "$SCRIPT_DIR/lib/worktree_manager.sh"
 source "$SCRIPT_DIR/lib/reconciler.sh"
 source "$SCRIPT_DIR/lib/parallel_orchestrator.sh"
+source "$SCRIPT_DIR/lib/telemetry.sh"
+source "$SCRIPT_DIR/lib/claude_runner.sh"
+source "$SCRIPT_DIR/lib/verify_gate.sh"
 
 # =============================================================================
 # DEFAULTS
@@ -38,8 +41,16 @@ RALPH_GH_MAX_LOOPS_TOTAL="${RALPH_GH_MAX_LOOPS_TOTAL:-0}"          # Max total i
 RALPH_GH_MAX_REVIEW_RUNS="${RALPH_GH_MAX_REVIEW_RUNS:-1}"          # Max end-of-group /review-best-practices runs before opening PR
 RALPH_MAX_PARALLEL="${RALPH_MAX_PARALLEL:-1}"                      # Max concurrent sub-workers per parent (1=disable parallelism, default for safety)
 RALPH_PARALLEL_ENABLED="${RALPH_PARALLEL_ENABLED:-0}"              # Master switch for the parallel scheduler (0=serial only, 1=honor RALPH_MAX_PARALLEL + DAG)
-RALPH_RECONCILER_MODEL="${RALPH_RECONCILER_MODEL:-claude-sonnet-4-6}"  # Model for merge reconciliation (cheaper than worker model)
+RALPH_RECONCILER_MODEL="${RALPH_RECONCILER_MODEL:-claude-sonnet-5}"  # Model for merge reconciliation (mechanical work)
 RALPH_RECONCILER_TIMEOUT_MINUTES="${RALPH_RECONCILER_TIMEOUT_MINUTES:-15}"
+# Model routing. RALPH_GH_MODEL (implementation) is resolved in load_config so a
+# .ralphrc that exports ANTHROPIC_MODEL still wins over the built-in default.
+RALPH_GH_MODEL="${RALPH_GH_MODEL:-}"
+RALPH_GH_REVIEW_MODEL="${RALPH_GH_REVIEW_MODEL:-claude-sonnet-5}"    # Pre-PR /review pass
+# Verifier / verify-gate / runner / telemetry defaults live in their lib files:
+#   lib/verify_gate.sh   RALPH_GH_VERIFY_CMD, RALPH_GH_VERIFIER_MODEL, ...
+#   lib/claude_runner.sh RALPH_GH_PERMISSION_MODE, RALPH_GH_DENY_RULES, RALPH_GH_FALLBACK_MODEL, ...
+#   lib/telemetry.sh     RALPH_GH_TELEMETRY_FILE
 
 # =============================================================================
 # REPO AUTO-DETECTION
@@ -106,6 +117,13 @@ load_config() {
     CB_STATE_FILE="$RALPH_GH_STATE_DIR/.circuit_breaker_state"
     STATE_DIR="$RALPH_GH_STATE_DIR"
     STATE_FILE="$RALPH_GH_STATE_DIR/state.json"
+
+    # Model routing: implementation model falls back to ANTHROPIC_MODEL (which
+    # .ralphrc may export) and then to Opus 5. Effort follows
+    # CLAUDE_CODE_EFFORT_LEVEL unless RALPH_GH_EFFORT is set explicitly.
+    RALPH_GH_MODEL="${RALPH_GH_MODEL:-${ANTHROPIC_MODEL:-claude-opus-5}}"
+    RALPH_GH_EFFORT="${RALPH_GH_EFFORT:-${CLAUDE_CODE_EFFORT_LEVEL:-}}"
+    export RALPH_TELEMETRY_REPO="$RALPH_GH_REPO"
 }
 
 # =============================================================================
@@ -155,6 +173,10 @@ process_parent_group() {
 
     log_status "INFO" "Processing parent issue #$parent_number on branch $branch_name"
     log_status "INFO" "Loops per sub-issue: $RALPH_GH_MAX_LOOPS_PER_ISSUE | Total limit: ${RALPH_GH_MAX_LOOPS_TOTAL:-unlimited}"
+    log_status "INFO" "Models: implement=$RALPH_GH_MODEL verifier=$RALPH_GH_VERIFIER_MODEL review=$RALPH_GH_REVIEW_MODEL | permission-mode=$RALPH_GH_PERMISSION_MODE | verify=$(resolve_verify_cmd "$RALPH_GH_WORKSPACE" | sed 's/^$/(none)/')"
+    export RALPH_TELEMETRY_PARENT="$parent_number"
+    export RALPH_TELEMETRY_SUB=""
+    export RALPH_TELEMETRY_LOOP=""
 
     # Activate the repo-level Stop hook (enforced via env var to avoid blocking
     # interactive Claude Code sessions in the same repo).
@@ -285,6 +307,8 @@ process_parent_group() {
             fi
 
             log_status "INFO" "Sub-issue #$sub_number — loop $loop_count/$RALPH_GH_MAX_LOOPS_PER_ISSUE (total: $total_loops)"
+            export RALPH_TELEMETRY_SUB="$sub_number"
+            export RALPH_TELEMETRY_LOOP="$loop_count"
 
             # Get session ID for continuity within retries of the SAME sub-issue
             local session_id
@@ -327,25 +351,48 @@ process_parent_group() {
                 continue
             fi
 
-            # Acceptance gate: parse ACCEPTANCE block from Claude output.
-            # Cheap (no Claude call) and the only per-sub-issue quality gate.
-            # The /review-best-practices pass runs once at the end of the whole
-            # parent group, not per sub-issue, to keep Claude costs bounded.
+            # Three gates, cheapest first. Any failure re-invokes Claude with
+            # the failure as retry context. A gate failure after a successful
+            # invocation is "progress with errors": has_progress=true resets the
+            # CB's no-progress counter; the same-error counter is the soft
+            # ceiling while RALPH_GH_MAX_LOOPS_PER_ISSUE stays the hard one.
+
+            # 1. Acceptance gate: the model's own structured report. Cheap.
             local acceptance_failures
             if ! acceptance_failures=$(run_acceptance_gate 2>&1); then
                 log_status "WARN" "Sub-issue #$sub_number: ACCEPTANCE gate failed"
-                log_status "WARN" "Unchecked criteria:"$'\n'"$acceptance_failures"
-                retry_context="ACCEPTANCE GATE FAILED. The following criteria are not yet met — address each one and re-report the ACCEPTANCE block with them checked. Evidence (file:line or test name) is required for each [X]."$'\n\n'"$acceptance_failures"
-                # Gate failure after a successful Claude invocation = progress with errors.
-                # Claude did real work (execute_for_sub_issue would have returned non-zero
-                # otherwise); the gate just found issues in it. has_progress=true so the
-                # CB's no-progress counter resets; same-error counter becomes the soft
-                # ceiling while RALPH_GH_MAX_LOOPS_PER_ISSUE stays the hard ceiling.
+                log_status "WARN" "Unmet criteria:"$'\n'"$acceptance_failures"
+                retry_context="ACCEPTANCE GATE FAILED. The following criteria are not yet met — address each one and re-report with them met. Evidence (file:line or test name) is required for each."$'\n\n'"$acceptance_failures"
                 record_result "true" "true"
                 continue
             fi
 
-            # Acceptance gate passed — commit any remaining uncommitted work
+            # 2. Verify gate: the shell runs the repo's test/build command
+            #    itself. This is the authoritative red/green — never the
+            #    model's tests_status, and never a Stop hook it can satisfy by
+            #    stopping twice.
+            local verify_failures
+            if ! verify_failures=$(run_verify_gate "$RALPH_GH_WORKSPACE" "$sub_start_ref"); then
+                log_status "WARN" "Sub-issue #$sub_number: VERIFY gate failed"
+                retry_context="TEST/BUILD GATE FAILED. The shell ran the project's verify command after your last turn and it was red. Fix the failures, run the command yourself until it is green, then re-report."$'\n\n'"$verify_failures"
+                record_result "true" "true"
+                continue
+            fi
+
+            # 3. Verifier gate: an independent read-only session grades the
+            #    diff against each acceptance criterion. The implementer never
+            #    grades itself.
+            local verifier_failures
+            if ! verifier_failures=$(run_verifier_gate "$RALPH_GH_WORKSPACE" "$RALPH_GH_REPO" \
+                    "$sub_number" "$(get_last_sub_title)" "$(get_last_sub_body)" "$sub_start_ref"); then
+                log_status "WARN" "Sub-issue #$sub_number: VERIFIER gate failed"
+                log_status "WARN" "Verifier findings:"$'\n'"$verifier_failures"
+                retry_context="INDEPENDENT VERIFIER REJECTED THE WORK. A separate reviewer read your diff against the acceptance criteria and found gaps. Address each item below — add the missing implementation or tests — then re-report with concrete evidence."$'\n\n'"$verifier_failures"
+                record_result "true" "true"
+                continue
+            fi
+
+            # All gates passed — commit any remaining uncommitted work
             local sub_title
             sub_title=$(get_issue_title "$RALPH_GH_REPO" "$sub_number" < /dev/null) || sub_title=""
             [[ -z "$sub_title" ]] && sub_title="Sub-issue $sub_number"
@@ -528,6 +575,7 @@ complete_group() {
 
     # Update state
     mark_parent_processed "$parent_number"
+    telemetry_record_outcome "pr_opened" "$closed_count issue(s) closed" || true
 
     if (( closed_count > 0 )); then
         log_status "SUCCESS" "Parent #$parent_number complete. PR opened, $closed_count issue(s) closed."
@@ -594,6 +642,7 @@ $completed_list" || true
     # label so the next run re-triggers (mirrors abort_group's behavior).
     clear_in_progress
     mark_parent_processed "$parent_number"
+    telemetry_record_outcome "draft_pr_held" "held: $held_list" || true
 
     log_status "WARN" "Parent #$parent_number: $closed_count shipped, held $held_list. Label kept for resume."
     return 0
@@ -682,6 +731,7 @@ $completed_list" || true
     # Label is kept so the next `ralph-gh run` can re-trigger it.
     clear_in_progress
     mark_parent_processed "$parent_number"
+    telemetry_record_outcome "aborted" "$failure_reason" || true
 
     log_status "WARN" "Parent #$parent_number aborted. Draft PR opened. Label kept for retry."
 }
@@ -1087,6 +1137,16 @@ case "${1:-}" in
         reset_circuit_breaker
         echo "State and circuit breaker reset"
         ;;
+    --stats)
+        # Per-parent summary from ~/.ralph-gh/telemetry.jsonl. Filters to the
+        # current repo when run inside one; --stats --all shows every repo.
+        _repo_filter=""
+        if [[ "${2:-}" != "--all" ]] && git rev-parse --show-toplevel >/dev/null 2>&1; then
+            load_config 2>/dev/null
+            _repo_filter="$RALPH_GH_REPO"
+        fi
+        telemetry_stats "$_repo_filter"
+        ;;
     --kill)
         load_config
         cd "$RALPH_GH_WORKSPACE"
@@ -1142,6 +1202,7 @@ case "${1:-}" in
         echo ""
         echo "Options:"
         echo "  --status    Show current status"
+        echo "  --stats     Per-parent telemetry: loops, cost, turns, gate failures (--stats --all for every repo)"
         echo "  --reset     Reset state and circuit breaker"
         echo "  --kill      Kill running instance and all child processes"
         echo "  --help      Show this help"
@@ -1149,13 +1210,22 @@ case "${1:-}" in
         echo "Configuration:"
         echo "  Global:  ~/.ralph-gh/ralph-gh.conf (timeouts, thresholds)"
         echo "  Project: <repo>/.ralphrc (per-repo overrides)"
-        echo "  Prompt:  <repo>/.ralph/PROMPT.md"
+        echo "  Prompt:  <repo>/.ralph/PROMPT.md (sent as system prompt)"
+        echo "  Verify:  <repo>/.ralph/verify.sh (shell-run test/build oracle after every Claude turn)"
         echo ""
         echo "Environment variables:"
         echo "  RALPH_GH_LABEL             Issue label to watch (default: ralph)"
         echo "  RALPH_GH_SKIP_LABEL        Hold label — issues with this label are deferred (default: empty / disabled)"
         echo "  RALPH_GH_MAIN_BRANCH       Base branch (default: main)"
         echo "  CLAUDE_TIMEOUT_MINUTES     Max time per sub-issue (default: 15)"
+        echo "  RALPH_GH_MODEL             Implementation model (default: ANTHROPIC_MODEL, then claude-opus-5)"
+        echo "  RALPH_GH_VERIFIER_MODEL    Independent verifier model (default: claude-sonnet-5)"
+        echo "  RALPH_GH_REVIEW_MODEL      Pre-PR review model (default: claude-sonnet-5)"
+        echo "  RALPH_GH_VERIFY_CMD        Test/build command run by the shell after each turn (default: .ralph/verify.sh)"
+        echo "  RALPH_GH_VERIFIER_ENABLED  1/0 — run the independent verifier gate (default: 1)"
+        echo "  RALPH_GH_PERMISSION_MODE   Claude permission mode (default: auto)"
+        echo "  RALPH_GH_DENY_RULES        Comma-separated hard deny rules passed via --settings"
+        echo "  RALPH_GH_TELEMETRY_FILE    Where run records go (default: ~/.ralph-gh/telemetry.jsonl)"
         echo "  RALPH_GH_REPO              Override auto-detected repo (deprecated)"
         echo "  RALPH_GH_WORKSPACE         Override auto-detected workspace (deprecated)"
         ;;

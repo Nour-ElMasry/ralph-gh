@@ -51,9 +51,9 @@ reconcile_merge() {
         prompt+=$(cat "$parent_worktree/.ralph/AGENT.md")
     fi
 
-    # Build Claude CLI command. Use Sonnet (cheaper than Opus, this work is
-    # mechanical) and a tight allowed-tools list.
-    local model="${RALPH_RECONCILER_MODEL:-claude-sonnet-4-6}"
+    # Sonnet: this work is mechanical. Tight allowed-tools list; the shared
+    # runner adds permission mode, deny rules, fallback model and telemetry.
+    local model="${RALPH_RECONCILER_MODEL:-claude-sonnet-5}"
     local timeout_minutes="${RALPH_RECONCILER_TIMEOUT_MINUTES:-15}"
     local timeout_seconds=$((timeout_minutes * 60))
     local allowed_tools="${RALPH_RECONCILER_ALLOWED_TOOLS:-Read,Edit,Write,Bash(git *),Bash(pnpm *),Bash(cat *),Bash(echo *)}"
@@ -66,34 +66,22 @@ reconcile_merge() {
 
     log_status "INFO" "Invoking reconciler ($model, kind=$failure_kind, timeout ${timeout_minutes}m)"
 
-    local -a cmd_args=("claude")
-    cmd_args+=("--model" "$model")
-    cmd_args+=("--output-format" "json")
-    cmd_args+=("--allowedTools")
-    local IFS=','
-    read -ra tools_array <<< "$allowed_tools"
-    for tool in "${tools_array[@]}"; do
-        tool=$(echo "$tool" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-        [[ -n "$tool" ]] && cmd_args+=("$tool")
-    done
-    cmd_args+=("-p" "$prompt")
-
     # Run with reconciliation context exported as env vars (the prompt reads them)
     local exit_code=0
     (
-        cd "$parent_worktree"
         export RECON_PARENT_ISSUE="$parent_issue"
         export RECON_PARENT_BRANCH="$parent_branch"
         export RECON_SUB_BRANCHES="$sub_branches"
         export RECON_FAILURE_KIND="$failure_kind"
         export RECON_CONFLICT_FILES="$conflict_files"
         export RECON_FAILURE_LOG_PATH="$failure_log_path"
-        portable_timeout "${timeout_seconds}s" "${cmd_args[@]}" \
-            < /dev/null > "$output_file" 2>"$stderr_file"
+        export RALPH_TELEMETRY_PARENT="$parent_issue"
+        export RALPH_TELEMETRY_SUB=""
+        export RALPH_TELEMETRY_LOOP=""
+        run_claude "$parent_worktree" "$prompt" "$output_file" "$stderr_file" "$timeout_seconds" \
+            "$model" "" "" "$allowed_tools" "" "reconcile"
     )
     exit_code=$?
-
-    reap_workspace_orphans "$parent_worktree"
 
     if [[ $exit_code -eq 124 ]]; then
         log_status "WARN" "Reconciler timed out after ${timeout_minutes}m"

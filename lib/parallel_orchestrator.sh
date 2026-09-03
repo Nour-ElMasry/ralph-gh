@@ -79,7 +79,14 @@ _spawn_sub_worker() {
 
         cd "$sub_worktree" || exit 1
 
-        # Loop per sub-issue with the same gate the legacy loop uses. Cap loops.
+        # All gates diff against the ref the sub started from.
+        local sub_start_ref
+        sub_start_ref=$(git rev-parse HEAD 2>/dev/null)
+        export RALPH_SUB_START_REF="$sub_start_ref"
+        export RALPH_TELEMETRY_PARENT="$parent_issue"
+        export RALPH_TELEMETRY_SUB="$sub_issue"
+
+        # Loop per sub-issue with the same gates the serial loop uses. Cap loops.
         local loop_count=0
         local sub_done=false
         local retry_context=""
@@ -87,6 +94,7 @@ _spawn_sub_worker() {
 
         while [[ "$sub_done" == "false" ]]; do
             loop_count=$((loop_count + 1))
+            export RALPH_TELEMETRY_LOOP="$loop_count"
             if [[ $loop_count -gt $RALPH_GH_MAX_LOOPS_PER_ISSUE ]]; then
                 log_status "ERROR" "Sub #$sub_issue hit max loops"
                 result=1
@@ -130,7 +138,22 @@ _spawn_sub_worker() {
 
             local acceptance_failures
             if ! acceptance_failures=$(run_acceptance_gate 2>&1); then
-                retry_context="ACCEPTANCE GATE FAILED. Address each criterion and re-report the ACCEPTANCE block.\n\n$acceptance_failures"
+                retry_context="ACCEPTANCE GATE FAILED. Address each criterion and re-report with them met. Evidence (file:line or test name) is required for each."$'\n\n'"$acceptance_failures"
+                record_result "true" "true"
+                continue
+            fi
+
+            local verify_failures
+            if ! verify_failures=$(run_verify_gate "$sub_worktree" "$sub_start_ref"); then
+                retry_context="TEST/BUILD GATE FAILED. The shell ran the project's verify command after your last turn and it was red. Fix the failures, run the command yourself until it is green, then re-report."$'\n\n'"$verify_failures"
+                record_result "true" "true"
+                continue
+            fi
+
+            local verifier_failures
+            if ! verifier_failures=$(run_verifier_gate "$sub_worktree" "$RALPH_GH_REPO" \
+                    "$sub_issue" "$(get_last_sub_title)" "$(get_last_sub_body)" "$sub_start_ref"); then
+                retry_context="INDEPENDENT VERIFIER REJECTED THE WORK. A separate reviewer read your diff against the acceptance criteria and found gaps. Address each item below — add the missing implementation or tests — then re-report with concrete evidence."$'\n\n'"$verifier_failures"
                 record_result "true" "true"
                 continue
             fi

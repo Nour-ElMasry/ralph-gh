@@ -149,6 +149,7 @@ All commands auto-detect repo and workspace from your current directory.
 | `ralph-gh run --label foo` | Override the trigger label for this run |
 | `ralph-gh setup` | Create the `ralph` label on the current repo |
 | `ralph-gh --status` | Show current status |
+| `ralph-gh --stats` | Per-parent telemetry: loops, turns, cost, gate failures (`--stats --all` for every repo) |
 | `ralph-gh --kill` | Kill running instance and all child processes |
 | `ralph-gh --reset` | Clear state and circuit breaker |
 
@@ -184,14 +185,24 @@ Optional. Applies across all repos:
 | `RALPH_GH_MAX_LOOPS_PER_ISSUE` | `5` | Max retries per sub-issue |
 | `RALPH_GH_MAX_LOOPS_TOTAL` | `0` | Max total retries per parent (0 = unlimited) |
 | `CB_NO_PROGRESS_THRESHOLD` | `3` | Circuit breaker opens after N stuck attempts |
+| `RALPH_GH_MODEL` | `$ANTHROPIC_MODEL`, then `claude-opus-5` | Implementation model |
+| `RALPH_GH_VERIFIER_MODEL` | `claude-sonnet-5` | Independent read-only verifier |
+| `RALPH_GH_REVIEW_MODEL` | `claude-sonnet-5` | Pre-PR review pass |
+| `RALPH_GH_FALLBACK_MODEL` | `claude-sonnet-5` | Used when the primary model is overloaded |
+| `RALPH_GH_PERMISSION_MODE` | `auto` | Claude Code permission mode for unattended runs |
+| `RALPH_GH_DENY_RULES` | force-push, reset, clean, PR/issue mutation, … | Hard deny list auto mode cannot override |
+| `RALPH_GH_VERIFY_CMD` | `.ralph/verify.sh` if present | Test/build command the shell runs after every turn |
+| `RALPH_GH_VERIFIER_ENABLED` | `1` | Run the independent verifier gate |
+| `RALPH_GH_TELEMETRY_FILE` | `~/.ralph-gh/telemetry.jsonl` | Run records; read with `ralph-gh --stats` |
 
 ### Per-repo settings
 
 | File | Purpose |
 |---|---|
 | `.ralphrc` | Override any global setting for this repo |
-| `.ralph/PROMPT.md` | System prompt — tech stack, conventions, architecture |
-| `.ralph/AGENT.md` | Build, test, and run instructions |
+| `.ralph/PROMPT.md` | System prompt (sent via `--append-system-prompt-file`) — tech stack, conventions, architecture |
+| `.ralph/AGENT.md` | Build, test, and run instructions (injected into the task prompt) |
+| `.ralph/verify.sh` | Test/build oracle the **shell** runs after every Claude turn. Exit 0 = green. Receives `RALPH_SUB_START_REF` to scope to the sub-issue's diff. Without it the verify gate is skipped with a warning. |
 
 **Priority:** defaults < global config < `.ralphrc` < environment variables
 
@@ -203,6 +214,8 @@ Ralph is designed to be **conservative, not clever**.
 |---|---|
 | **Label-gated** | Only touches issues you explicitly label. No surprises. |
 | **Never auto-merges** | Always opens a PR for human review. You decide what ships. |
+| **Three gates per sub-issue** | The model's structured report, then the shell running your tests/build, then a separate read-only Claude session grading the diff against each acceptance criterion. Any red re-invokes the implementer with the failure as context. The implementer never grades itself. |
+| **Hard deny list** | Runs in auto permission mode (classifier-approved tool calls, nothing blocks on a human) with a deny list for force-push, reset, clean, branch switching, and PR/issue mutation that auto mode cannot override. |
 | **Circuit breaker** | Stops after N stuck attempts. Opens a draft PR with partial work. |
 | **Resumable** | Interrupted mid-work? Next run picks up where it left off. |
 | **Live progress** | Sub-issue checkboxes update in real time on GitHub. |
@@ -219,9 +232,27 @@ ralph-gh.sh                          CLI + orchestration
   +-- lib/state_manager.sh           JSON state persistence
   +-- lib/circuit_breaker.sh         Stagnation detection (Nygard pattern)
   +-- lib/worktree_manager.sh        Worktree isolation for parallel workers
+  +-- lib/claude_runner.sh           The one place `claude -p` is invoked (flags, deny list, schema, telemetry)
+  +-- lib/verify_gate.sh             Shell test/build oracle + independent verifier session
+  +-- lib/telemetry.sh               Append-only run records (~/.ralph-gh/telemetry.jsonl) + --stats
   +-- lib/utils.sh                   Logging + cross-platform timeout
   +-- lib/date_utils.sh              Date helpers (Linux + macOS)
 ```
+
+### The loop, per sub-issue
+
+```
+claude -p  (implementer, structured JSON report)
+   |
+   +-- 1. acceptance gate   parse the report: every checklist item met, with evidence?
+   +-- 2. verify gate       shell runs .ralph/verify.sh (tests + build) — authoritative red/green
+   +-- 3. verifier gate     fresh read-only claude -p (Sonnet) grades the diff per criterion
+   |
+   any red --> re-invoke the implementer (same session) with the failure as context
+   all green --> commit, tick the checkbox on GitHub, next sub-issue
+```
+
+Retries are bounded by `RALPH_GH_MAX_LOOPS_PER_ISSUE` and the circuit breaker. Every Claude call and gate verdict is one line in the telemetry file; `ralph-gh --stats` summarises loops, turns, cost and gate failures per parent.
 
 <details>
 <summary><strong>State file</strong></summary>

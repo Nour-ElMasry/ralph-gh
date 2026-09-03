@@ -15,9 +15,39 @@ RALPH_GH_SKIP_LABEL=""                    # Optional hold label (HITL). Issues w
 RALPH_GH_MAIN_BRANCH="main"              # Base branch for PRs
 CLAUDE_TIMEOUT_MINUTES=15                 # Max time per sub-issue
 
-# Allowed tools for Claude Code CLI
-# Comma-separated list of tool permissions
+# Permissions. ralph-gh runs Claude in `--permission-mode auto` (a classifier
+# approves tool calls; nothing blocks waiting for a human). The allow list
+# below is a fast path that skips the classifier for known-safe tools; anything
+# NOT listed is still allowed if the classifier approves it. The deny list is a
+# hard stop that auto mode cannot override.
+RALPH_GH_PERMISSION_MODE="auto"           # auto | acceptEdits | dontAsk | manual
+RALPH_GH_DENY_RULES="Bash(git push --force*),Bash(git push -f*),Bash(git push origin --delete*),Bash(git push --delete*),Bash(git reset --hard*),Bash(git clean*),Bash(git branch -D*),Bash(git checkout main*),Bash(git checkout master*),Bash(git switch main*),Bash(git switch master*),Bash(git worktree*),Bash(git stash drop*),Bash(gh pr merge*),Bash(gh pr create*),Bash(gh issue close*),Bash(gh issue edit*),Bash(rm -rf /*),Bash(rm -rf ~*)"
+RALPH_GH_SETTING_SOURCES="user,project,local"   # named explicitly so repo hooks/skills keep loading if --bare becomes the -p default
 RALPH_GH_ALLOWED_TOOLS="Write,Read,Edit,Bash(git add *),Bash(git commit *),Bash(git diff *),Bash(git log *),Bash(git status),Bash(git status *),Bash(git push *),Bash(git pull *),Bash(git fetch *),Bash(git checkout *),Bash(git branch *),Bash(git stash *),Bash(git merge *),Bash(git tag *),Bash(npm *),Bash(pnpm *),Bash(node *),Bash(find *)"
+
+# Models. Implementation defaults to $ANTHROPIC_MODEL (set it in .ralphrc), then
+# Opus 5. The verifier, review and reconcile passes run on Sonnet 5.
+RALPH_GH_MODEL=""                         # empty = ANTHROPIC_MODEL, then claude-opus-5
+RALPH_GH_VERIFIER_MODEL="claude-sonnet-5" # independent read-only grader
+RALPH_GH_REVIEW_MODEL="claude-sonnet-5"   # pre-PR /review-best-practices pass
+RALPH_RECONCILER_MODEL="claude-sonnet-5"  # parallel-merge reconciliation
+RALPH_GH_FALLBACK_MODEL="claude-sonnet-5" # --fallback-model when the primary is overloaded ("" disables)
+RALPH_GH_EFFORT=""                        # low|medium|high|xhigh|max; empty = CLAUDE_CODE_EFFORT_LEVEL
+RALPH_GH_MAX_BUDGET_USD=""                # --max-budget-usd per Claude call; empty = no cap
+
+# Gates (run after EVERY Claude turn, in this order; any failure re-invokes
+# Claude with the failure as context):
+#   1. acceptance — the model's structured report, one entry per `- [ ]` item
+#   2. verify     — the shell runs the repo's test/build command itself
+#   3. verifier   — a separate read-only Claude session grades the diff
+RALPH_GH_VERIFY_CMD=""                    # empty = <repo>/.ralph/verify.sh if present, else the gate is skipped (WARN)
+RALPH_GH_VERIFY_TIMEOUT_MINUTES=15
+RALPH_GH_VERIFIER_ENABLED=1
+RALPH_GH_VERIFIER_TIMEOUT_MINUTES=10
+
+# Telemetry: one JSON line per Claude call / gate verdict / parent outcome.
+# Survives worktree cleanup. Read it with `ralph-gh --stats`.
+RALPH_GH_TELEMETRY_FILE="$HOME/.ralph-gh/telemetry.jsonl"
 
 # Loop control
 RALPH_GH_MAX_LOOPS_PER_ISSUE=5           # Max Claude invocations per sub-issue (retries until complete)
