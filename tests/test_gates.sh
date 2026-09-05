@@ -9,6 +9,7 @@ source "$SCRIPT_DIR/lib/telemetry.sh"
 source "$SCRIPT_DIR/lib/claude_runner.sh"
 source "$SCRIPT_DIR/lib/verify_gate.sh"
 source "$SCRIPT_DIR/lib/issue_worker.sh"
+source "$SCRIPT_DIR/lib/branch_manager.sh"
 
 PASS=0
 FAIL=0
@@ -180,6 +181,36 @@ sleep 0.2
 reap_workspace_orphans "$TMP/reapws" >/dev/null 2>&1
 kill -0 "$orphan" 2>/dev/null && orphan_alive=yes || orphan_alive=no
 assert_eq "reaper kills a real orphan rooted in the workspace" "no" "$orphan_alive"
+
+echo ""
+echo "=== PR reuse on resume ==="
+# A resumed parent already has the draft PR from the run that stopped;
+# `gh pr create` then fails with "already exists". Stub gh to record calls and
+# answer `pr list` with an existing URL or nothing.
+GH_CALLS="$TMP/gh_calls"; : > "$GH_CALLS"
+gh() {
+    echo "$1 $2" >> "$GH_CALLS"
+    if [[ "$1" == "pr" && "$2" == "list" ]]; then
+        printf '%s' "$GH_EXISTING_PR"
+        return 0
+    fi
+    [[ "$1" == "pr" && "$2" == "create" ]] && echo "https://github.com/o/r/pull/9"
+    return 0
+}
+export -f gh
+
+GH_EXISTING_PR="https://github.com/o/r/pull/7"
+open_draft_pr "o/r" "ralph/issue-1" "main" 1 "title" "- #2" "held" >/dev/null 2>&1
+assert_eq "draft reopen edits the existing PR instead of creating one" "pr list,pr edit" "$(paste -sd, "$GH_CALLS")"
+
+: > "$GH_CALLS"
+open_pr "o/r" "ralph/issue-1" "main" 1 "title" "- #2" >/dev/null 2>&1
+assert_eq "final open_pr updates the existing draft and marks it ready" "pr list,pr edit,pr ready" "$(paste -sd, "$GH_CALLS")"
+
+: > "$GH_CALLS"; GH_EXISTING_PR=""
+open_draft_pr "o/r" "ralph/issue-1" "main" 1 "title" "- #2" "held" >/dev/null 2>&1
+assert_eq "no existing PR still creates one" "pr list,pr create" "$(paste -sd, "$GH_CALLS")"
+unset -f gh
 
 echo ""
 echo "=== telemetry ==="

@@ -97,6 +97,22 @@ Automated by [ralph-gh](https://github.com/Nour-ElMasry/ralph-gh)
 EOF
 )
 
+    # A resumed parent usually already has the draft PR from the run that
+    # stopped. Re-creating it fails ("a pull request for branch ... already
+    # exists"), so update that PR in place and mark it ready instead.
+    local existing_url
+    existing_url=$(find_open_pr_url "$repo" "$branch_name")
+    if [[ -n "$existing_url" ]]; then
+        local err
+        if err=$(gh pr edit "$existing_url" --repo "$repo" --title "$pr_title" --body "$pr_body" 2>&1 >/dev/null) \
+            && err=$(gh pr ready "$existing_url" --repo "$repo" 2>&1 >/dev/null); then
+            log_status "SUCCESS" "PR updated and marked ready: $existing_url"
+            return 0
+        fi
+        log_status "ERROR" "gh pr edit/ready failed: $err"
+        return 1
+    fi
+
     local pr_url
     if pr_url=$(gh pr create \
         --repo "$repo" \
@@ -109,6 +125,15 @@ EOF
         log_status "ERROR" "gh pr create failed: $pr_url"
         return 1
     fi
+}
+
+# Echo the URL of the open PR whose head is this branch, or nothing.
+#   $1 = repo, $2 = branch name
+find_open_pr_url() {
+    local repo=$1
+    local branch_name=$2
+    gh pr list --repo "$repo" --head "$branch_name" --state open \
+        --json url --jq '.[0].url // empty' 2>/dev/null || true
 }
 
 # Open a draft PR for partial/failed work
@@ -145,6 +170,18 @@ Automated by [ralph-gh](https://github.com/Nour-ElMasry/ralph-gh)
 EOF
 )
 
+    local existing_url
+    existing_url=$(find_open_pr_url "$repo" "$branch_name")
+    if [[ -n "$existing_url" ]]; then
+        local err
+        if err=$(gh pr edit "$existing_url" --repo "$repo" --title "$pr_title" --body "$pr_body" 2>&1 >/dev/null); then
+            log_status "SUCCESS" "Draft PR updated: $existing_url"
+            return 0
+        fi
+        log_status "ERROR" "gh pr edit (draft) failed: $err"
+        return 1
+    fi
+
     local pr_url
     if pr_url=$(gh pr create \
         --repo "$repo" \
@@ -161,4 +198,4 @@ EOF
 }
 
 export -f ensure_latest_main create_branch commit_changes push_branch
-export -f open_pr open_draft_pr
+export -f open_pr open_draft_pr find_open_pr_url
