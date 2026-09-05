@@ -72,13 +72,17 @@ proc_state() {
 # 45-minute loops in a row look hung). Anything whose CWD is inside the
 # workspace after the CLI died is such an orphan, except this script's own
 # process chain, which cd'd into the worktree itself.
+# The chain is walked from $BASHPID, not $$: the gates run inside $(...), and
+# in that subshell $$ still names the main script, so the subshell doing the
+# reaping is not $$ and would otherwise kill itself (#1132: five verifier
+# PASS verdicts lost, circuit breaker tripped on the empty "failure").
 # Linux /proc only; silently a no-op elsewhere (macOS).
 reap_workspace_orphans() {
     local workspace=$1
     [[ -n "$workspace" && -d "$workspace" && -d /proc ]] || return 0
 
-    local protected=" $$ $PPID "
-    local p=$PPID
+    local protected=" $$ $PPID ${BASHPID:-$$} "
+    local p=${BASHPID:-$$}
     while [[ -n "$p" && "$p" != "0" && "$p" != "1" ]]; do
         p=$(grep -s '^PPid:' "/proc/$p/status" | awk '{print $2}')
         [[ -n "$p" ]] && protected+=" $p "

@@ -160,6 +160,28 @@ diffs=$(ls "$RALPH_GH_STATE_DIR"/verifier/diff_1_*.patch | wc -l)
 assert_eq "diff file was written for the verifier" "true" "$([[ $diffs -ge 1 ]] && echo true || echo false)"
 
 echo ""
+echo "=== orphan reaper ==="
+# ralph-gh.sh runs the gates inside $(...) after cd'ing into the worktree, so
+# the reaper's caller is a subshell whose cwd is the workspace. It must not
+# reap itself (the #1132 postmortem: every verifier PASS was lost because the
+# gate subshell was killed the moment the CLI exited).
+mkdir -p "$TMP/reapws"
+rc=0; out=$(cd "$TMP/reapws" && reap_workspace_orphans "$TMP/reapws" && echo survived) || rc=$?
+assert_eq "reaper spares its own command-substitution subshell" "0:survived" "$rc:$out"
+sleep 30 > /dev/null 2>&1 &
+orphan=$!
+( cd "$TMP/reapws" && reap_workspace_orphans "$TMP/reapws" >/dev/null 2>&1 )
+kill -0 "$orphan" 2>/dev/null && orphan_alive=yes || orphan_alive=no
+assert_eq "reaper ignores processes outside the workspace" "yes" "$orphan_alive"
+kill "$orphan" 2>/dev/null || true
+( cd "$TMP/reapws" && exec sleep 30 ) > /dev/null 2>&1 &
+orphan=$!
+sleep 0.2
+reap_workspace_orphans "$TMP/reapws" >/dev/null 2>&1
+kill -0 "$orphan" 2>/dev/null && orphan_alive=yes || orphan_alive=no
+assert_eq "reaper kills a real orphan rooted in the workspace" "no" "$orphan_alive"
+
+echo ""
 echo "=== telemetry ==="
 export RALPH_TELEMETRY_REPO="o/r" RALPH_TELEMETRY_PARENT="10" RALPH_TELEMETRY_SUB="11" RALPH_TELEMETRY_LOOP="2"
 printf '%s' '{"type":"result","is_error":false,"num_turns":7,"duration_ms":60000,"total_cost_usd":1.25,"stop_reason":"end_turn","session_id":"s","permission_denials":[{"tool":"Bash"}],"structured_output":{"x":1},"modelUsage":{"claude-opus-5":{}},"usage":{"input_tokens":10,"output_tokens":20}}' > "$TMP/r.json"
