@@ -196,7 +196,7 @@ Optional. Applies across all repos:
 | `RALPH_GH_TELEMETRY_FILE` | `~/.ralph-gh/telemetry.jsonl` | Run records; read with `ralph-gh --stats` |
 | `RALPH_GH_CGROUP` | `1` | Re-exec every run inside a bounded systemd slice (`0` = uncapped) |
 | `RALPH_GH_CGROUP_SLICE` | `ralph.slice` | The slice all concurrent runs share |
-| `RALPH_GH_MEMORY_MAX` | `6G` | Memory ceiling for the whole slice, not per run |
+| `RALPH_GH_MEMORY_MAX` | `auto` | Memory ceiling for the whole slice, not per run; `auto` = 75% of RAM |
 | `RALPH_GH_MEMORY_SWAP_MAX` | `0` | Swap the slice may use; `0` fails fast instead of thrashing |
 | `RALPH_GH_CPU_WEIGHT` | `50` | CPU weight of the slice (default unit weight is 100) |
 
@@ -206,9 +206,12 @@ whole WSL machine. So `ralph-gh run` re-executes itself under
 `systemd-run --user --scope --slice=ralph.slice`, and the slice carries the
 memory and CPU limits. Runs share the ceiling; when it is hit the kernel kills
 the largest process *inside the slice* (a test worker, a build) and that one
-command fails, while the rest of the machine stays usable. Needs a user
-systemd manager (Linux, WSL2 with systemd on); elsewhere the run proceeds
-uncapped with a `WARN`.
+command fails, while the rest of the machine stays usable. The scope carries
+`OOMPolicy=continue`, so that single kill does not take the run down with it
+(systemd's default `stop` would SIGTERM the whole run — and since the victim
+is picked from the entire slice, one run's build spike could abort another).
+Needs a user systemd manager (Linux, WSL2 with systemd on); elsewhere the run
+proceeds uncapped with a `WARN`.
 
 ### Per-repo settings
 

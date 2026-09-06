@@ -5,6 +5,8 @@
 # Covers:
 #   - cgroup_in_slice: reads an injected cgroup file, matches only the named slice
 #   - cgroup_slice_properties: the property list handed to systemctl
+#   - cgroup_resolve_memory_max: `auto` sizes from MemTotal, else pass-through
+#   - cgroup_scope_properties: the scope never stops on a single OOM kill
 #   - cgroup_reexec_in_slice: returns (does not exec) when disabled, when
 #                             already inside the slice, and when unsupported
 #   - count_other_ralph_runs: counts held worktree locks, skips our own
@@ -60,6 +62,22 @@ assert_eq "property list in systemctl form" \
     $'MemoryMax=6G\nMemorySwapMax=0\nCPUWeight=50' \
     "$(cgroup_slice_properties 6G 0 50)"
 
+echo "=== cgroup_resolve_memory_max ==="
+
+printf 'MemTotal:       12250356 kB\nMemFree:        5000000 kB\n' > "$TMP/meminfo-12g"
+printf 'MemTotal:       20447232 kB\n' > "$TMP/meminfo-20g"
+printf 'MemTotal:       1048576 kB\n' > "$TMP/meminfo-1g"
+
+assert_eq "explicit value passes through" "6G" "$(cgroup_resolve_memory_max 6G "$TMP/meminfo-12g")"
+assert_eq "auto on a 12 GB WSL VM → 75% floored to GiB" "8G" "$(cgroup_resolve_memory_max auto "$TMP/meminfo-12g")"
+assert_eq "auto on a 20 GB VM" "14G" "$(cgroup_resolve_memory_max auto "$TMP/meminfo-20g")"
+assert_eq "auto never goes below 2G" "2G" "$(cgroup_resolve_memory_max auto "$TMP/meminfo-1g")"
+assert_eq "auto without meminfo (macOS) → 6G" "6G" "$(cgroup_resolve_memory_max auto "$TMP/no-such-meminfo")"
+
+echo "=== cgroup_scope_properties ==="
+
+assert_eq "scope survives a single OOM kill" "OOMPolicy=continue" "$(cgroup_scope_properties)"
+
 echo "=== cgroup_reexec_in_slice returns instead of exec-ing ==="
 
 # Any exec here would replace the test shell, so a return is the whole assertion.
@@ -75,6 +93,10 @@ cgroup_in_slice() { return 1; }
 cgroup_available() { return 1; }
 warned=$(RALPH_GH_CGROUP=1 cgroup_reexec_in_slice /bin/true run 1 2>&1 >/dev/null)
 assert_eq "unsupported host → returns with a WARN" "1" "$(grep -c 'running UNCAPPED' <<< "$warned")"
+
+RALPH_GH_CGROUP=0 RALPH_GH_MEMORY_MAX=auto
+cgroup_reexec_in_slice /bin/true run 1
+assert_eq "auto is resolved to a concrete size even when the re-exec is skipped" "1" "$(grep -cE '^[0-9]+G$' <<< "$RALPH_GH_MEMORY_MAX")"
 
 echo "=== count_other_ralph_runs ==="
 

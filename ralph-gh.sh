@@ -1034,7 +1034,7 @@ run_command() {
     other_runs=$(count_other_ralph_runs "$RALPH_GH_WORKSPACE/.ralph-workers" "${_TARGET_ISSUES[0]:-}")
     if [[ "$other_runs" -gt 0 ]]; then
         if [[ "$RALPH_GH_CGROUP" == "1" ]]; then
-            log_status "WARN" "$other_runs other ralph run(s) active on this machine — all share the $RALPH_GH_CGROUP_SLICE ceiling (MemoryMax=$RALPH_GH_MEMORY_MAX); expect OOM-killed test workers if they overlap"
+            log_status "WARN" "$other_runs other ralph run(s) active on this machine — all share the $RALPH_GH_CGROUP_SLICE ceiling (MemoryMax=$RALPH_GH_MEMORY_MAX); an overlap that hits it OOM-kills one process and fails that command, the runs themselves survive"
         else
             log_status "WARN" "$other_runs other ralph run(s) active on this machine and RALPH_GH_CGROUP=0 — nothing bounds their combined memory"
         fi

@@ -10,6 +10,20 @@
 # OOM-kills the largest process inside the slice (a test worker, a build) and
 # that one command fails; the rest of the machine stays responsive.
 #
+# The scope itself carries OOMPolicy=continue. systemd's default for a scope
+# is `stop`: one OOM-killed process anywhere in the scope makes systemd
+# SIGTERM everything else in it, i.e. the whole run aborts to a draft PR —
+# and because the kernel picks its victim from the entire slice, run A's
+# build spike could abort run B. Three overlapping runs died that way on
+# 2026-09-06. With `continue` only the killed process is lost; the command
+# that spawned it fails and the run carries on.
+#
+# MemoryMax defaults to `auto`: 75% of MemTotal, so the ceiling follows the
+# machine (and a resized WSL VM) instead of a number frozen in a config file.
+# A slice pinned at its ceiling does not just OOM-kill: it evicts and
+# re-reads file cache continuously, which shows up as the disk at 100%. Size
+# for headroom, not for the bare minimum.
+#
 # Why a slice and not per-scope properties: on WSL2 (systemd 255) a scope
 # created under the default app.slice never gets memory.max applied even
 # when MemoryMax is passed, whereas a named slice does. Verified 2026-09-06.
@@ -19,7 +33,7 @@
 
 RALPH_GH_CGROUP="${RALPH_GH_CGROUP:-1}"                    # 0 disables the re-exec
 RALPH_GH_CGROUP_SLICE="${RALPH_GH_CGROUP_SLICE:-ralph.slice}"
-RALPH_GH_MEMORY_MAX="${RALPH_GH_MEMORY_MAX:-6G}"          # shared by every concurrent run
+RALPH_GH_MEMORY_MAX="${RALPH_GH_MEMORY_MAX:-auto}"        # shared by every concurrent run; auto = 75% of MemTotal
 RALPH_GH_MEMORY_SWAP_MAX="${RALPH_GH_MEMORY_SWAP_MAX:-0}"  # 0 = fail fast, never thrash into swap
 RALPH_GH_CPU_WEIGHT="${RALPH_GH_CPU_WEIGHT:-50}"          # default weight is 100; interactive work wins ties
 
@@ -42,10 +56,34 @@ cgroup_available() {
     systemd-run --user --scope --quiet --slice="$slice" -- true >/dev/null 2>&1
 }
 
+# Resolve the configured MemoryMax to a concrete size. `auto` becomes 75% of
+# MemTotal rounded down to whole GiB (never below 2G); anything else passes
+# through untouched. Without /proc/meminfo (macOS) `auto` falls back to 6G.
+#   $1 = configured value
+#   $2 = meminfo file to read (default /proc/meminfo; injectable for tests)
+cgroup_resolve_memory_max() {
+    local configured=$1
+    local meminfo=${2:-/proc/meminfo}
+    [[ "$configured" == "auto" ]] || { printf '%s' "$configured"; return 0; }
+
+    local total_kb
+    total_kb=$(awk '/^MemTotal:/{print $2}' "$meminfo" 2>/dev/null)
+    [[ "$total_kb" =~ ^[0-9]+$ ]] || { printf '6G'; return 0; }
+
+    local gib=$(( total_kb * 3 / 4 / 1048576 ))
+    (( gib < 2 )) && gib=2
+    printf '%dG' "$gib"
+}
+
 # The systemd property assignments for the slice, one per line.
 #   $1 = MemoryMax, $2 = MemorySwapMax, $3 = CPUWeight
 cgroup_slice_properties() {
     printf 'MemoryMax=%s\nMemorySwapMax=%s\nCPUWeight=%s\n' "$1" "$2" "$3"
+}
+
+# The systemd property assignments for the per-run scope, one per line.
+cgroup_scope_properties() {
+    printf 'OOMPolicy=continue\n'
 }
 
 # Apply the limits to the slice (runtime only — nothing persists past reboot;
@@ -76,6 +114,10 @@ cgroup_reexec_in_slice() {
     local script=$1
     shift
 
+    # Resolved here, after config load, so both the parent and the re-exec'd
+    # child (which re-sources the same `auto`) log the concrete figure.
+    RALPH_GH_MEMORY_MAX=$(cgroup_resolve_memory_max "$RALPH_GH_MEMORY_MAX")
+
     [[ "$RALPH_GH_CGROUP" == "1" ]] || return 0
     cgroup_in_slice "$RALPH_GH_CGROUP_SLICE" && return 0
 
@@ -86,8 +128,14 @@ cgroup_reexec_in_slice() {
 
     cgroup_apply_slice_limits "$RALPH_GH_CGROUP_SLICE" || return 0
 
-    log_status "INFO" "Re-launching inside $RALPH_GH_CGROUP_SLICE (MemoryMax=$RALPH_GH_MEMORY_MAX MemorySwapMax=$RALPH_GH_MEMORY_SWAP_MAX CPUWeight=$RALPH_GH_CPU_WEIGHT, shared by every concurrent run)"
-    exec systemd-run --user --scope --quiet --slice="$RALPH_GH_CGROUP_SLICE" -- "$script" "$@"
+    local -a scope_props=()
+    local line
+    while IFS= read -r line; do
+        scope_props+=(--property="$line")
+    done < <(cgroup_scope_properties)
+
+    log_status "INFO" "Re-launching inside $RALPH_GH_CGROUP_SLICE (MemoryMax=$RALPH_GH_MEMORY_MAX MemorySwapMax=$RALPH_GH_MEMORY_SWAP_MAX CPUWeight=$RALPH_GH_CPU_WEIGHT, shared by every concurrent run; OOMPolicy=continue)"
+    exec systemd-run --user --scope --quiet --slice="$RALPH_GH_CGROUP_SLICE" "${scope_props[@]}" -- "$script" "$@"
 }
 
 # Count targeted runs other than ours that currently hold a worktree lock.
@@ -110,4 +158,5 @@ count_other_ralph_runs() {
 }
 
 export -f cgroup_in_slice cgroup_available cgroup_slice_properties
+export -f cgroup_resolve_memory_max cgroup_scope_properties
 export -f cgroup_apply_slice_limits cgroup_reexec_in_slice count_other_ralph_runs

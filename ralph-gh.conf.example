@@ -61,12 +61,14 @@ CB_SAME_ERROR_THRESHOLD=5                # Open after N repeated errors
 # systemd scope under ONE shared slice, so however many runs you start at once,
 # their Claude sessions, test workers, typechecks and builds share a single
 # memory ceiling. Hitting it OOM-kills the largest process inside the slice
-# (one test worker, one build) instead of stalling the whole machine. Needs
+# (one test worker, one build) instead of stalling the whole machine; the run
+# that spawned it carries on (the scope runs with OOMPolicy=continue). Needs
 # `systemd-run --user`; where that is missing the run proceeds uncapped with a
-# WARN. Size MemoryMax to what the box can spare beside your interactive work.
+# WARN. `auto` sizes MemoryMax to 75% of the machine's RAM; a slice held at
+# its ceiling thrashes file cache (disk at 100%), so give it headroom.
 RALPH_GH_CGROUP=1                        # 0 = never re-exec, run uncapped
 RALPH_GH_CGROUP_SLICE="ralph.slice"
-RALPH_GH_MEMORY_MAX="6G"                 # shared by every concurrent run
+RALPH_GH_MEMORY_MAX="auto"               # shared by every concurrent run; auto = 75% of MemTotal, or e.g. "8G"
 RALPH_GH_MEMORY_SWAP_MAX="0"             # 0 = fail fast rather than thrash into swap
 RALPH_GH_CPU_WEIGHT=50                   # default weight is 100; interactive work wins ties
 
