@@ -57,6 +57,19 @@ RALPH_GH_MAX_LOOPS_TOTAL=0              # Max total invocations per parent group
 CB_NO_PROGRESS_THRESHOLD=3               # Open after N sub-issues with no progress
 CB_SAME_ERROR_THRESHOLD=5                # Open after N repeated errors
 
+# Resource caps. Every `ralph-gh run` re-executes itself inside a transient
+# systemd scope under ONE shared slice, so however many runs you start at once,
+# their Claude sessions, test workers, typechecks and builds share a single
+# memory ceiling. Hitting it OOM-kills the largest process inside the slice
+# (one test worker, one build) instead of stalling the whole machine. Needs
+# `systemd-run --user`; where that is missing the run proceeds uncapped with a
+# WARN. Size MemoryMax to what the box can spare beside your interactive work.
+RALPH_GH_CGROUP=1                        # 0 = never re-exec, run uncapped
+RALPH_GH_CGROUP_SLICE="ralph.slice"
+RALPH_GH_MEMORY_MAX="6G"                 # shared by every concurrent run
+RALPH_GH_MEMORY_SWAP_MAX="0"             # 0 = fail fast rather than thrash into swap
+RALPH_GH_CPU_WEIGHT=50                   # default weight is 100; interactive work wins ties
+
 # Parallel execution (experimental — disabled by default)
 # When 0, every parent runs its sub-issues serially regardless of any
 # `max_parallel` field declared in the PRD DAG. When 1, parents whose DAG

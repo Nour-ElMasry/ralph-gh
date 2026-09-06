@@ -194,6 +194,21 @@ Optional. Applies across all repos:
 | `RALPH_GH_VERIFY_CMD` | `.ralph/verify.sh` if present | Test/build command the shell runs after every turn |
 | `RALPH_GH_VERIFIER_ENABLED` | `1` | Run the independent verifier gate |
 | `RALPH_GH_TELEMETRY_FILE` | `~/.ralph-gh/telemetry.jsonl` | Run records; read with `ralph-gh --stats` |
+| `RALPH_GH_CGROUP` | `1` | Re-exec every run inside a bounded systemd slice (`0` = uncapped) |
+| `RALPH_GH_CGROUP_SLICE` | `ralph.slice` | The slice all concurrent runs share |
+| `RALPH_GH_MEMORY_MAX` | `6G` | Memory ceiling for the whole slice, not per run |
+| `RALPH_GH_MEMORY_SWAP_MAX` | `0` | Swap the slice may use; `0` fails fast instead of thrashing |
+| `RALPH_GH_CPU_WEIGHT` | `50` | CPU weight of the slice (default unit weight is 100) |
+
+**Resource caps.** A run is a Claude session plus whatever it launches — test
+workers, typechecks, builds — and three runs side by side once took down a
+whole WSL machine. So `ralph-gh run` re-executes itself under
+`systemd-run --user --scope --slice=ralph.slice`, and the slice carries the
+memory and CPU limits. Runs share the ceiling; when it is hit the kernel kills
+the largest process *inside the slice* (a test worker, a build) and that one
+command fails, while the rest of the machine stays usable. Needs a user
+systemd manager (Linux, WSL2 with systemd on); elsewhere the run proceeds
+uncapped with a `WARN`.
 
 ### Per-repo settings
 

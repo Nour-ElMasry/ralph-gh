@@ -22,6 +22,7 @@ source "$SCRIPT_DIR/lib/parallel_orchestrator.sh"
 source "$SCRIPT_DIR/lib/telemetry.sh"
 source "$SCRIPT_DIR/lib/claude_runner.sh"
 source "$SCRIPT_DIR/lib/verify_gate.sh"
+source "$SCRIPT_DIR/lib/resource_caps.sh"
 
 # =============================================================================
 # DEFAULTS
@@ -996,6 +997,11 @@ run_command() {
     # Load config (3-layer)
     load_config
 
+    # Everything below — Claude, its test workers, typechecks, builds — runs
+    # under one bounded slice shared with every other concurrent run. Never
+    # returns when it re-execs; the child prints the banner again.
+    cgroup_reexec_in_slice "$SCRIPT_DIR/ralph-gh.sh" "${_RALPH_ARGV[@]}"
+
     # Apply CLI --label override after config loading
     [[ -n "${_LABEL_OVERRIDE:-}" ]] && RALPH_GH_LABEL="$_LABEL_OVERRIDE"
     [[ -n "${_SKIP_LABEL_OVERRIDE:-}" ]] && RALPH_GH_SKIP_LABEL="$_SKIP_LABEL_OVERRIDE"
@@ -1023,6 +1029,16 @@ run_command() {
 
     # Trap Ctrl+C / SIGTERM — kill entire process group for clean shutdown
     trap 'log_status "WARN" "Caught signal, shutting down..."; kill 0 2>/dev/null; exit 130' INT TERM
+
+    local other_runs
+    other_runs=$(count_other_ralph_runs "$RALPH_GH_WORKSPACE/.ralph-workers" "${_TARGET_ISSUES[0]:-}")
+    if [[ "$other_runs" -gt 0 ]]; then
+        if [[ "$RALPH_GH_CGROUP" == "1" ]]; then
+            log_status "WARN" "$other_runs other ralph run(s) active on this machine — all share the $RALPH_GH_CGROUP_SLICE ceiling (MemoryMax=$RALPH_GH_MEMORY_MAX); expect OOM-killed test workers if they overlap"
+        else
+            log_status "WARN" "$other_runs other ralph run(s) active on this machine and RALPH_GH_CGROUP=0 — nothing bounds their combined memory"
+        fi
+    fi
 
     # Fresh run: clear processed list (label removal is the primary dedup)
     clear_processed
@@ -1064,6 +1080,8 @@ run_command() {
 # =============================================================================
 # CLI
 # =============================================================================
+
+_RALPH_ARGV=("$@")
 
 case "${1:-}" in
     run)
