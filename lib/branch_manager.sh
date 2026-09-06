@@ -100,16 +100,16 @@ EOF
     # A resumed parent usually already has the draft PR from the run that
     # stopped. Re-creating it fails ("a pull request for branch ... already
     # exists"), so update that PR in place and mark it ready instead.
-    local existing_url
-    existing_url=$(find_open_pr_url "$repo" "$branch_name")
-    if [[ -n "$existing_url" ]]; then
+    local existing_number
+    existing_number=$(find_open_pr_number "$repo" "$branch_name")
+    if [[ -n "$existing_number" ]]; then
         local err
-        if err=$(gh pr edit "$existing_url" --repo "$repo" --title "$pr_title" --body "$pr_body" 2>&1 >/dev/null) \
-            && err=$(gh pr ready "$existing_url" --repo "$repo" 2>&1 >/dev/null); then
-            log_status "SUCCESS" "PR updated and marked ready: $existing_url"
+        if err=$(update_pr_text "$repo" "$existing_number" "$pr_title" "$pr_body") \
+            && err=$(gh pr ready "$existing_number" --repo "$repo" 2>&1 >/dev/null); then
+            log_status "SUCCESS" "PR #$existing_number updated and marked ready"
             return 0
         fi
-        log_status "ERROR" "gh pr edit/ready failed: $err"
+        log_status "ERROR" "PR #$existing_number update/ready failed: $err"
         return 1
     fi
 
@@ -127,13 +127,26 @@ EOF
     fi
 }
 
-# Echo the URL of the open PR whose head is this branch, or nothing.
+# Echo the number of the open PR whose head is this branch, or nothing.
 #   $1 = repo, $2 = branch name
-find_open_pr_url() {
+find_open_pr_number() {
     local repo=$1
     local branch_name=$2
     gh pr list --repo "$repo" --head "$branch_name" --state open \
-        --json url --jq '.[0].url // empty' 2>/dev/null || true
+        --json number --jq '.[0].number // empty' 2>/dev/null || true
+}
+
+# Set a PR's title and body over REST. `gh pr edit` also queries Projects
+# (classic), which GitHub has sunset, so on gh < 2.63 it fails outright:
+# "GraphQL: Projects (classic) is being deprecated ... (projectCards)".
+#   $1 = repo, $2 = PR number, $3 = title, $4 = body
+# Echoes gh's error text on failure.
+update_pr_text() {
+    local repo=$1
+    local number=$2
+    local title=$3
+    local body=$4
+    gh api -X PATCH "repos/$repo/pulls/$number" -f title="$title" -f body="$body" 2>&1 >/dev/null
 }
 
 # Open a draft PR for partial/failed work
@@ -170,15 +183,15 @@ Automated by [ralph-gh](https://github.com/Nour-ElMasry/ralph-gh)
 EOF
 )
 
-    local existing_url
-    existing_url=$(find_open_pr_url "$repo" "$branch_name")
-    if [[ -n "$existing_url" ]]; then
+    local existing_number
+    existing_number=$(find_open_pr_number "$repo" "$branch_name")
+    if [[ -n "$existing_number" ]]; then
         local err
-        if err=$(gh pr edit "$existing_url" --repo "$repo" --title "$pr_title" --body "$pr_body" 2>&1 >/dev/null); then
-            log_status "SUCCESS" "Draft PR updated: $existing_url"
+        if err=$(update_pr_text "$repo" "$existing_number" "$pr_title" "$pr_body"); then
+            log_status "SUCCESS" "Draft PR #$existing_number updated"
             return 0
         fi
-        log_status "ERROR" "gh pr edit (draft) failed: $err"
+        log_status "ERROR" "Draft PR #$existing_number update failed: $err"
         return 1
     fi
 
@@ -198,4 +211,4 @@ EOF
 }
 
 export -f ensure_latest_main create_branch commit_changes push_branch
-export -f open_pr open_draft_pr find_open_pr_url
+export -f open_pr open_draft_pr find_open_pr_number update_pr_text

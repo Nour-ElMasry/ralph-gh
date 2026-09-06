@@ -186,9 +186,12 @@ echo ""
 echo "=== PR reuse on resume ==="
 # A resumed parent already has the draft PR from the run that stopped;
 # `gh pr create` then fails with "already exists". Stub gh to record calls and
-# answer `pr list` with an existing URL or nothing.
+# answer `pr list` with an existing PR number or nothing. Title/body go over
+# REST (`gh api -X PATCH`) because `gh pr edit` breaks on the Projects
+# (classic) sunset for gh < 2.63.
 GH_CALLS="$TMP/gh_calls"; : > "$GH_CALLS"
 gh() {
+    if [[ "$1" == "api" ]]; then echo "api $3" >> "$GH_CALLS"; return 0; fi
     echo "$1 $2" >> "$GH_CALLS"
     if [[ "$1" == "pr" && "$2" == "list" ]]; then
         printf '%s' "$GH_EXISTING_PR"
@@ -199,13 +202,13 @@ gh() {
 }
 export -f gh
 
-GH_EXISTING_PR="https://github.com/o/r/pull/7"
+GH_EXISTING_PR="7"
 open_draft_pr "o/r" "ralph/issue-1" "main" 1 "title" "- #2" "held" >/dev/null 2>&1
-assert_eq "draft reopen edits the existing PR instead of creating one" "pr list,pr edit" "$(paste -sd, "$GH_CALLS")"
+assert_eq "draft reopen patches the existing PR instead of creating one" "pr list,api PATCH" "$(paste -sd, "$GH_CALLS")"
 
 : > "$GH_CALLS"
 open_pr "o/r" "ralph/issue-1" "main" 1 "title" "- #2" >/dev/null 2>&1
-assert_eq "final open_pr updates the existing draft and marks it ready" "pr list,pr edit,pr ready" "$(paste -sd, "$GH_CALLS")"
+assert_eq "final open_pr patches the existing draft and marks it ready" "pr list,api PATCH,pr ready" "$(paste -sd, "$GH_CALLS")"
 
 : > "$GH_CALLS"; GH_EXISTING_PR=""
 open_draft_pr "o/r" "ralph/issue-1" "main" 1 "title" "- #2" "held" >/dev/null 2>&1
