@@ -81,7 +81,7 @@ _spawn_sub_worker() {
 
         # All gates diff against the ref the sub started from.
         local sub_start_ref
-        sub_start_ref=$(git rev-parse HEAD 2>/dev/null)
+        sub_start_ref=$(resolve_sub_start_ref "$sub_issue") || sub_start_ref=$(git rev-parse HEAD 2>/dev/null)
         export RALPH_SUB_START_REF="$sub_start_ref"
         export RALPH_TELEMETRY_PARENT="$parent_issue"
         export RALPH_TELEMETRY_SUB="$sub_issue"

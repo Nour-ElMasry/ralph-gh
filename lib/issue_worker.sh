@@ -173,6 +173,11 @@ execute_for_sub_issue() {
 
     log_status "INFO" "Invoking Claude Code (${RALPH_GH_MODEL:-default model}, timeout: ${timeout_minutes}m)..."
 
+    # Rule 5 tells the model to commit, so a fully committed turn leaves a
+    # clean tree. Remember where HEAD was so new commits count as progress.
+    local turn_start_head
+    turn_start_head=$(git rev-parse HEAD 2>/dev/null || true)
+
     local exit_code=0
     run_claude "$workspace" "$prompt" "$output_file" "$stderr_file" "$timeout_seconds" \
         "${RALPH_GH_MODEL:-}" "$WORKER_SCHEMA" "$session_id" "$allowed_tools" "" "implement" || exit_code=$?
@@ -226,6 +231,11 @@ execute_for_sub_issue() {
         has_changes=true
     fi
     if [[ -n "$(git ls-files --others --exclude-standard 2>/dev/null)" ]]; then
+        has_changes=true
+    fi
+    local turn_end_head
+    turn_end_head=$(git rev-parse HEAD 2>/dev/null || true)
+    if [[ "$turn_end_head" != "$turn_start_head" ]]; then
         has_changes=true
     fi
 

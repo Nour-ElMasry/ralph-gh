@@ -130,6 +130,11 @@ run_claude() {
     local exit_code=0
     (
         cd "$workspace" || exit 1
+        # RALPH_GH_ACTIVE arms the repo's Stop hook (test suite + build before
+        # the implementer may finish). The verifier is read-only and grades a
+        # diff it did not write; letting the hook run a 10-minute suite inside
+        # its 10-minute budget just times the verdict out (#1132: #1134, #1136).
+        [[ "$phase" == "verifier" ]] && unset RALPH_GH_ACTIVE
         portable_timeout "${timeout_seconds}s" "${cmd_args[@]}" \
             < /dev/null > "$output_file" 2>"$stderr_file"
     )

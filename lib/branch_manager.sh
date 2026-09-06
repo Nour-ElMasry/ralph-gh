@@ -12,6 +12,30 @@ ensure_latest_main() {
     git pull origin "$main_branch" 2>/dev/null
 }
 
+# Echo the ref a sub-issue's gates should diff against. Normally HEAD, but a
+# branch resumed after an abort or hold can already carry commits for this sub
+# from an earlier run (the state dir that knew it was done is gone by then).
+# Diffing from HEAD would show the verifier nothing and fail the sub as
+# "nothing implemented" (#1132 second run, five loops lost). Start just before
+# the first commit since the merge base whose subject names the sub instead.
+#   $1 = sub-issue number, $2 = main branch (default main)
+resolve_sub_start_ref() {
+    local sub_number=$1
+    local main_branch="${2:-${RALPH_GH_MAIN_BRANCH:-main}}"
+    local head base first
+    head=$(git rev-parse HEAD 2>/dev/null) || return 1
+    base=$(git merge-base HEAD "origin/$main_branch" 2>/dev/null) || { printf '%s' "$head"; return 0; }
+    first=$(git log --reverse --format='%H %s' "${base}..HEAD" 2>/dev/null         | grep -E -m1 "#${sub_number}([^0-9]|$)" | cut -d' ' -f1)
+    if [[ -z "$first" ]]; then
+        printf '%s' "$head"
+        return 0
+    fi
+    local prior
+    prior=$(git rev-list --count "${first}..HEAD" 2>/dev/null || echo 0)
+    log_status "INFO" "Sub-issue #$sub_number: branch already carries $((prior + 1)) commit(s) for it — gates diff from ${first:0:8}^ (resume)"
+    git rev-parse "${first}^" 2>/dev/null
+}
+
 # Create a new branch for a parent issue group
 create_branch() {
     local branch_name=$1
@@ -210,5 +234,5 @@ EOF
     fi
 }
 
-export -f ensure_latest_main create_branch commit_changes push_branch
+export -f ensure_latest_main create_branch commit_changes push_branch resolve_sub_start_ref
 export -f open_pr open_draft_pr find_open_pr_number update_pr_text

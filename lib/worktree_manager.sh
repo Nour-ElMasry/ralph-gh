@@ -125,9 +125,7 @@ _worktree_create() {
 # Clean up a worktree after PR creation (success path)
 worktree_cleanup() {
     local issue_number=$1
-    # "success" deletes logs as before; anything else archives them first — an
-    # aborted run's logs are the postmortem evidence, and the abort path used
-    # to print "full log at <path>" and then delete that very path (#894).
+    # Kept for callers; logs are archived on every outcome (see below).
     local outcome=${2:-failure}
 
     local worktree_dir="$WORKTREE_BASE/issue-${issue_number}"
@@ -143,9 +141,13 @@ worktree_cleanup() {
         git -C "$_RALPH_MAIN_WORKSPACE" worktree remove "$worktree_dir" --force 2>/dev/null || rm -rf "$worktree_dir"
     fi
 
-    # Remove the external state dir for this issue (logs + state.json)
+    # Remove the external state dir for this issue (logs + state.json). Logs
+    # are archived on every outcome: a "success" return also covers the held
+    # path (sub deferred for a human), whose logs are exactly what the human
+    # needs, and they cost a few hundred KB (#1132: a discarded verifier
+    # verdict was unrecoverable after the hold-path cleanup).
     if [[ -d "$state_dir" ]]; then
-        if [[ "$outcome" != "success" && -d "$state_dir/logs" ]]; then
+        if [[ -d "$state_dir/logs" ]]; then
             local archive_dir="$HOME/.ralph-gh/archive/issue-${issue_number}-$(date '+%Y%m%d_%H%M%S')"
             mkdir -p "$archive_dir"
             if mv "$state_dir/logs" "$archive_dir/logs" 2>/dev/null; then

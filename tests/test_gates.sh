@@ -156,9 +156,39 @@ RALPH_TEST_VERIFIER_JSON='{"type":"result","result":"crashed"}'
 RALPH_TEST_VERIFIER_RC=1
 rc=0; run_verifier_gate "$WS" "o/r" "1" "t" "b" "$start" >/dev/null || rc=$?
 assert_eq "verifier infra failure → inconclusive pass" "0" "$rc"
+# The CLI can be killed by the timeout AFTER writing its verdict (a repo Stop
+# hook running the suite during teardown). The verdict still counts.
+RALPH_TEST_VERIFIER_JSON='{"type":"result","structured_output":{"verdict":"FAIL","criteria":[{"criterion":"B","met":false,"reason":"missing"}],"summary":"B missing"}}'
+RALPH_TEST_VERIFIER_RC=124
+rc=0; out=$(run_verifier_gate "$WS" "o/r" "1" "t" "b" "$start") || rc=$?
+assert_eq "timed-out CLI with a FAIL verdict → still 1" "1" "$rc"
+assert_contains "timed-out FAIL still lists the unmet criterion" "- B — missing" "$out"
+RALPH_TEST_VERIFIER_JSON='{"type":"result","structured_output":{"verdict":"PASS","criteria":[{"criterion":"A","met":true,"reason":"ok"}],"summary":"fine"}}'
+RALPH_TEST_VERIFIER_RC=137
+rc=0; run_verifier_gate "$WS" "o/r" "1" "t" "b" "$start" >/dev/null || rc=$?
+assert_eq "killed CLI with a PASS verdict → 0" "0" "$rc"
 unset -f run_claude; RALPH_TEST_VERIFIER_RC=0
 diffs=$(ls "$RALPH_GH_STATE_DIR"/verifier/diff_1_*.patch | wc -l)
 assert_eq "diff file was written for the verifier" "true" "$([[ $diffs -ge 1 ]] && echo true || echo false)"
+
+echo ""
+echo "=== RALPH_GH_ACTIVE per phase ==="
+# An earlier block unset the stubbed run_claude; restore the real one.
+source "$SCRIPT_DIR/lib/claude_runner.sh"
+# Stub the CLI: record whether the repo Stop hook would have been armed.
+FAKEBIN="$TMP/fakebin"; mkdir -p "$FAKEBIN"
+cat > "$FAKEBIN/claude" <<'FAKE'
+#!/usr/bin/env bash
+printf '{"type":"result","active":"%s"}' "${RALPH_GH_ACTIVE:-unset}"
+FAKE
+chmod +x "$FAKEBIN/claude"
+export RALPH_GH_ACTIVE=1
+PATH="$FAKEBIN:$PATH" run_claude "$WS" "p" "$TMP/ph_v.json" "$TMP/ph_v.err" 30 "" "" "" "" "dontAsk" "verifier" >/dev/null 2>&1 || true
+assert_eq "verifier phase runs with the Stop hook disarmed" "unset" "$(jq -r .active "$TMP/ph_v.json")"
+PATH="$FAKEBIN:$PATH" run_claude "$WS" "p" "$TMP/ph_i.json" "$TMP/ph_i.err" 30 "" "" "" "" "" "implement" >/dev/null 2>&1 || true
+assert_eq "implement phase keeps the Stop hook armed" "1" "$(jq -r .active "$TMP/ph_i.json")"
+assert_eq "caller's RALPH_GH_ACTIVE is untouched" "1" "$RALPH_GH_ACTIVE"
+unset RALPH_GH_ACTIVE
 
 echo ""
 echo "=== orphan reaper ==="
@@ -214,6 +244,26 @@ assert_eq "final open_pr patches the existing draft and marks it ready" "pr list
 open_draft_pr "o/r" "ralph/issue-1" "main" 1 "title" "- #2" "held" >/dev/null 2>&1
 assert_eq "no existing PR still creates one" "pr list,pr create" "$(paste -sd, "$GH_CALLS")"
 unset -f gh
+
+echo ""
+echo "=== sub_start_ref on a resumed branch ==="
+# A branch resumed after an abort already carries the sub's commits; the gates
+# must diff from before those commits, not from HEAD (#1132 second run).
+R="$TMP/resume"; mkdir -p "$R"
+git -C "$R" init -q -b main; git -C "$R" -c user.name=t -c user.email=t@t commit -q --allow-empty -m "base"
+git -C "$R" update-ref refs/remotes/origin/main HEAD
+git -C "$R" checkout -q -b ralph/issue-9
+base_sha=$(git -C "$R" rev-parse HEAD)
+assert_eq "fresh branch → HEAD" "$base_sha" "$(cd "$R" && resolve_sub_start_ref 7 2>/dev/null)"
+git -C "$R" -c user.name=t -c user.email=t@t commit -q --allow-empty -m "feat: #71 - other sub"
+other_sha=$(git -C "$R" rev-parse HEAD)
+git -C "$R" -c user.name=t -c user.email=t@t commit -q --allow-empty -m "feat: #7 - first slice"
+git -C "$R" -c user.name=t -c user.email=t@t commit -q --allow-empty -m "fix: #7 - follow-up"
+assert_eq "resumed sub → parent of its first commit" "$other_sha" "$(cd "$R" && resolve_sub_start_ref 7 2>/dev/null)"
+assert_eq "#71's commit is not mistaken for #7's" "$base_sha" "$(cd "$R" && resolve_sub_start_ref 71 2>/dev/null)"
+assert_eq "sub with no commits → HEAD" "$(git -C "$R" rev-parse HEAD)" "$(cd "$R" && resolve_sub_start_ref 8 2>/dev/null)"
+git -C "$R" update-ref -d refs/remotes/origin/main
+assert_eq "no origin/main → HEAD" "$(git -C "$R" rev-parse HEAD)" "$(cd "$R" && resolve_sub_start_ref 7 2>/dev/null)"
 
 echo ""
 echo "=== telemetry ==="

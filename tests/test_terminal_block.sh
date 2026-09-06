@@ -75,6 +75,31 @@ assert_eq "COMPLETE returns 0" "0" "$(run_execute "$COMPLETE")"
 assert_eq "prose-only STATUS: COMPLETE with no changes is NOT trusted (returns 1)" "1" "$(run_execute "$NO_STRUCTURED")"
 assert_eq "stream/array result form is parsed (terminal block → 2)" "2" "$(run_execute "$ARRAY_FORM")"
 
+# A turn that committed its work (clean tree, HEAD moved) is progress even
+# when the model reports IN_PROGRESS — this is what a real turn looks like.
+IN_PROGRESS_COMMITTED='{"type":"result","is_error":false,"result":"committed, one criterion pending","session_id":"66666666-6666-6666-6666-666666666666","structured_output":{"status":"IN_PROGRESS","exit_signal":false,"tests_status":"PASSING","recommendation":"continue","acceptance":[]}}'
+git() {
+    case "$1 $2" in
+        "rev-parse HEAD") echo "sha-$(date +%s%N)" ;;
+        *) return 0 ;;
+    esac
+}
+assert_eq "IN_PROGRESS with a clean tree but a new commit returns 0 (progress)" "0" "$(run_execute "$IN_PROGRESS_COMMITTED")"
+git() {
+    case "$1 $2" in
+        "rev-parse HEAD") echo "same-sha" ;;
+        *) return 0 ;;
+    esac
+}
+assert_eq "IN_PROGRESS with a clean tree and unchanged HEAD returns 1 (no progress)" "1" "$(run_execute "$IN_PROGRESS_COMMITTED")"
+git() {
+    case "$1 $2" in
+        "diff --quiet"|"diff --cached") return 0 ;;
+        "ls-files") return 0 ;;
+        *) return 0 ;;
+    esac
+}
+
 echo ""
 echo "=== session + status persistence ==="
 run_execute "$COMPLETE" >/dev/null
@@ -92,7 +117,7 @@ assert_eq "empty when no structured report" "" "$(get_last_recommendation)"
 echo ""
 echo "=== telemetry side-effect ==="
 n=$(grep -c '"event":"claude"' "$RALPH_GH_TELEMETRY_FILE" 2>/dev/null || echo 0)
-assert_eq "one telemetry record per invocation (8 runs)" "8" "$n"
+assert_eq "one telemetry record per invocation (10 runs)" "10" "$n"
 assert_eq "telemetry carries phase=implement" "implement" "$(tail -1 "$RALPH_GH_TELEMETRY_FILE" | jq -r .phase)"
 
 echo ""

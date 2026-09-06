@@ -205,13 +205,20 @@ run_verifier_gate() {
     local so
     so=$(claude_structured_output "$output_file")
 
-    if [[ $rc -ne 0 || -z "$so" ]]; then
+    if [[ -z "$so" ]]; then
         # The verifier itself broke (timeout, API error, no structured output).
         # Don't block work on tooling failure, but say so loudly and record it.
-        log_status "ERROR" "Verifier gate inconclusive (exit $rc, structured_output=$([[ -n "$so" ]] && echo yes || echo no)) — passing with a warning. Log: $output_file"
+        log_status "ERROR" "Verifier gate inconclusive (exit $rc, no structured_output) — passing with a warning. Log: $output_file"
         [[ -s "$stderr_file" ]] && tail -10 "$stderr_file" >&2
         telemetry_record_gate "verifier" "skip" "inconclusive exit $rc" 2>/dev/null || true
         return 0
+    fi
+    if [[ $rc -ne 0 ]]; then
+        # The verdict was written, then the CLI overran (a repo Stop hook that
+        # runs the test suite, or the timeout landing during teardown). The
+        # verdict is what we asked for — grade on it rather than waving the
+        # sub through as inconclusive (#1132: #1134's verdict was discarded).
+        log_status "WARN" "Verifier CLI exited $rc after writing its verdict — grading on the verdict"
     fi
 
     printf '%s' "$so" > "$vdir/verdict_${sub_number}_${stamp}.json"

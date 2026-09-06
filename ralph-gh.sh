@@ -268,7 +268,7 @@ process_parent_group() {
         # this ref so the review/acceptance sees the full sub-issue change set,
         # regardless of whether Claude made intermediate commits.
         local sub_start_ref
-        sub_start_ref=$(git rev-parse HEAD 2>/dev/null)
+        sub_start_ref=$(resolve_sub_start_ref "$sub_number") || sub_start_ref=$(git rev-parse HEAD 2>/dev/null)
         # Export so the repo-level Stop hook can scope its test-gate to the sub-issue diff
         export RALPH_SUB_START_REF="$sub_start_ref"
 
