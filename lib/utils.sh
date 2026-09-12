@@ -129,8 +129,40 @@ reap_workspace_orphans() {
     return 0
 }
 
+# Fingerprint the work sitting in a worktree: HEAD plus the content of every
+# modified and untracked file. Two fingerprints differ iff the turn actually
+# moved something.
+#
+# The circuit breaker used to be told `has_progress=false` for any non-zero
+# Claude exit, so a turn killed by the wall clock counted as stagnation no
+# matter how much it had written. #1119 died that way: three timeouts on
+# sub-issue #1127 opened the breaker and aborted the parent, while the wip
+# commit ralph made on the way out held 23 new files and 5,634 lines of
+# working code produced by exactly those three "no progress" attempts.
+#
+# `git status --porcelain` alone is not enough — a file that was already
+# modified stays a bare `M` however many times its contents change, so a loop
+# spent editing files an earlier loop had already touched would still read as
+# stagnant. Hash the contents instead.
+workspace_tree_fingerprint() {
+    local workspace=${1:-.}
+    # `git ls-files` prints paths relative to the repo root, so the hashing has
+    # to happen from inside the worktree or sha1sum resolves every one of them
+    # against the caller's cwd, finds nothing, and the fingerprint silently
+    # degrades to "HEAD only" — which never changes within a sub-issue.
+    (
+        cd "$workspace" 2>/dev/null || exit 0
+        {
+            git rev-parse HEAD 2>/dev/null || echo "no-head"
+            git ls-files -m -o --exclude-standard -z 2>/dev/null |
+                xargs -0 -r sha1sum 2>/dev/null | sort
+        } | sha1sum | cut -d' ' -f1
+    )
+}
+
 export -f log_status
 export -f portable_timeout
+export -f workspace_tree_fingerprint
 export -f proc_cmdline
 export -f proc_state
 export -f reap_workspace_orphans

@@ -184,13 +184,24 @@ execute_for_sub_issue() {
 
     # Save path for downstream gate functions (run_acceptance_gate reads this)
     echo "$output_file" > "$RALPH_GH_STATE_DIR/.last_claude_output_path"
-    rm -f "$RALPH_GH_STATE_DIR/.last_status.json"
+    rm -f "$RALPH_GH_STATE_DIR/.last_status.json" "$RALPH_GH_STATE_DIR/.last_failure_kind"
 
     if [[ $exit_code -eq 124 ]]; then
+        echo "timeout" > "$RALPH_GH_STATE_DIR/.last_failure_kind"
         log_status "WARN" "Claude Code timed out after ${timeout_minutes} minutes"
         if [[ -s "$stderr_file" ]]; then
             log_status "WARN" "Claude stderr (tail):"
             tail -15 "$stderr_file" >&2 || true
+        fi
+        # A killed turn never wrote its result JSON, but run_claude knows the
+        # id it ran under. Hand it to the retry so the next loop resumes the
+        # same conversation instead of re-reading the issue and rediscovering
+        # the files this turn already wrote. `timeout` sends TERM before KILL,
+        # which is enough for the CLI to close the transcript cleanly — a
+        # resumed session comes back knowing what it was mid-way through.
+        if [[ -n "${RALPH_LAST_SESSION_ID:-}" ]]; then
+            echo "$RALPH_LAST_SESSION_ID" > "$RALPH_GH_STATE_DIR/.claude_session_id"
+            log_status "INFO" "Retry will resume timed-out session: ${RALPH_LAST_SESSION_ID:0:20}..."
         fi
         return 1
     fi

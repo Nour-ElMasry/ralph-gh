@@ -315,6 +315,11 @@ process_parent_group() {
             local session_id
             session_id=$(get_saved_session_id)
 
+            # Fingerprint the tree so a failed turn can still be graded on what
+            # it actually wrote, rather than on its exit code alone.
+            local tree_before
+            tree_before=$(workspace_tree_fingerprint "$RALPH_GH_WORKSPACE")
+
             # Execute Claude for this sub-issue (passes retry_context from prior gate failures)
             local result=0
             execute_for_sub_issue \
@@ -340,7 +345,24 @@ process_parent_group() {
             fi
 
             if [[ $result -ne 0 ]]; then
-                record_result "false" "true"
+                # A turn can be killed by the wall clock having written half a
+                # slice. Grade it on the tree, not on the exit code: the
+                # breaker exists to catch stagnation, and a turn that moved
+                # files is not stagnant. #1119 aborted on three timeouts that
+                # had between them produced 23 files and 5,634 lines.
+                local tree_after failure_progress="false"
+                tree_after=$(workspace_tree_fingerprint "$RALPH_GH_WORKSPACE")
+                [[ "$tree_after" != "$tree_before" ]] && failure_progress="true"
+
+                local failure_kind=""
+                [[ -f "$RALPH_GH_STATE_DIR/.last_failure_kind" ]] &&
+                    failure_kind=$(<"$RALPH_GH_STATE_DIR/.last_failure_kind")
+
+                if [[ "$failure_progress" == "true" ]]; then
+                    log_status "INFO" "Failed turn still moved the tree — counting it as progress"
+                fi
+                record_result "$failure_progress" "true"
+
                 if ! can_execute; then
                     log_status "ERROR" "Circuit breaker tripped on sub-issue #$sub_number (loop $loop_count)"
                     abort_group "$parent_number" "$branch_name" \
@@ -348,7 +370,11 @@ process_parent_group() {
                     return 1
                 fi
                 log_status "WARN" "Sub-issue #$sub_number loop $loop_count: Claude invocation failed, retrying..."
-                retry_context="Previous Claude invocation failed or produced no changes. Re-read the acceptance criteria and try again."
+                if [[ "$failure_kind" == "timeout" ]]; then
+                    retry_context="YOUR PREVIOUS TURN WAS KILLED BY THE ${CLAUDE_TIMEOUT_MINUTES}-MINUTE WALL CLOCK, mid-work. This turn resumes that same session, and everything the last turn wrote is still in the worktree. Continue from where you were — do not start over, do not re-read what you have already read, and check the tree before rewriting a file you may already have written. Budget the rest of this turn: run tests scoped to the files you changed, not whole suites."
+                else
+                    retry_context="Previous Claude invocation failed or produced no changes. Re-read the acceptance criteria and try again."
+                fi
                 continue
             fi
 

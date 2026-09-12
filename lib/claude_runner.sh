@@ -42,10 +42,12 @@ claude_deny_settings_json() {
 #   $1 = workspace (for .ralph/PROMPT.md)
 #   $2 = model (may be empty → CLI default / ANTHROPIC_MODEL)
 #   $3 = json schema (may be empty)
-#   $4 = session id to --resume (may be empty)
+#   $4 = session id (may be empty)
 #   $5 = comma-separated allowed tools (may be empty)
 #   $6 = permission mode (empty → RALPH_GH_PERMISSION_MODE)
 #   $7 = "nosys" to skip the .ralph/PROMPT.md system prompt (optional)
+#   $8 = session mode: "resume" (default — $4 names an existing session) or
+#        "new" ($4 is an id to create, so the caller knows it before the call)
 claude_build_args() {
     local workspace=$1
     local model=$2
@@ -54,6 +56,7 @@ claude_build_args() {
     local allowed_tools=$5
     local permission_mode=${6:-$RALPH_GH_PERMISSION_MODE}
     local sys_mode=${7:-}
+    local session_mode=${8:-resume}
 
     printf '%s\n' "--output-format" "json"
     printf '%s\n' "--permission-mode" "$permission_mode"
@@ -88,7 +91,13 @@ claude_build_args() {
     [[ -n "$RALPH_GH_EFFORT" ]] && printf '%s\n' "--effort" "$RALPH_GH_EFFORT"
     [[ -n "$RALPH_GH_MAX_BUDGET_USD" ]] && printf '%s\n' "--max-budget-usd" "$RALPH_GH_MAX_BUDGET_USD"
     [[ -n "$schema" ]] && printf '%s\n' "--json-schema" "$schema"
-    [[ -n "$session_id" ]] && printf '%s\n' "--resume" "$session_id"
+    if [[ -n "$session_id" ]]; then
+        if [[ "$session_mode" == "new" ]]; then
+            printf '%s\n' "--session-id" "$session_id"
+        else
+            printf '%s\n' "--resume" "$session_id"
+        fi
+    fi
     return 0
 }
 
@@ -105,6 +114,14 @@ claude_build_args() {
 #  $10 = permission mode (may be empty → default)
 #  $11 = telemetry phase label (implement|review|verifier|reconcile)
 # Returns the CLI exit code (124 on timeout). Records a telemetry event.
+#
+# Sets RALPH_LAST_SESSION_ID to the session this call ran in, whether or not
+# the CLI lived long enough to say so itself. A resume reuses the id it was
+# given; a fresh call mints one and passes it via --session-id. That is what
+# makes a turn killed by the wall clock resumable: the result JSON never
+# arrives, so reading .session_id out of it (the only route ralph had) yields
+# nothing and the retry starts cold, re-reading the issue and rediscovering
+# its own half-written files. #1119 paid that on six of seven sub-issues.
 run_claude() {
     local workspace=$1
     local prompt=$2
@@ -120,11 +137,18 @@ run_claude() {
 
     mkdir -p "$(dirname "$output_file")" "$(dirname "$stderr_file")"
 
+    local session_mode="resume"
+    if [[ -z "$session_id" ]]; then
+        session_mode="new"
+        session_id=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || true)
+    fi
+    RALPH_LAST_SESSION_ID="$session_id"
+
     local -a cmd_args=("claude")
     local line
     while IFS= read -r line; do
         cmd_args+=("$line")
-    done < <(claude_build_args "$workspace" "$model" "$schema" "$session_id" "$allowed_tools" "$permission_mode")
+    done < <(claude_build_args "$workspace" "$model" "$schema" "$session_id" "$allowed_tools" "$permission_mode" "" "$session_mode")
     cmd_args+=("-p" "$prompt")
 
     local exit_code=0
