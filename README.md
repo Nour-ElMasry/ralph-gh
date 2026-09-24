@@ -185,7 +185,7 @@ Optional. Applies across all repos:
 | `RALPH_GH_MAX_LOOPS_PER_ISSUE` | `5` | Max retries per sub-issue |
 | `RALPH_GH_MAX_LOOPS_TOTAL` | `0` | Max total retries per parent (0 = unlimited) |
 | `CB_NO_PROGRESS_THRESHOLD` | `3` | Circuit breaker opens after N stuck attempts |
-| `RALPH_GH_MODEL` | `$ANTHROPIC_MODEL`, then `claude-opus-5` | Implementation model |
+| `RALPH_GH_MODEL` | `$ANTHROPIC_MODEL`, then `claude-opus-5-5` | Implementation model |
 | `RALPH_GH_VERIFIER_MODEL` | `claude-sonnet-5` | Independent read-only verifier |
 | `RALPH_GH_REVIEW_MODEL` | `claude-sonnet-5` | Pre-PR review pass |
 | `RALPH_GH_FALLBACK_MODEL` | `claude-sonnet-5` | Used when the primary model is overloaded |

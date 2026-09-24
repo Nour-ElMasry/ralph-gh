@@ -122,7 +122,7 @@ load_config() {
     # Model routing: implementation model falls back to ANTHROPIC_MODEL (which
     # .ralphrc may export) and then to Opus 5. Effort follows
     # CLAUDE_CODE_EFFORT_LEVEL unless RALPH_GH_EFFORT is set explicitly.
-    RALPH_GH_MODEL="${RALPH_GH_MODEL:-${ANTHROPIC_MODEL:-claude-opus-5}}"
+    RALPH_GH_MODEL="${RALPH_GH_MODEL:-${ANTHROPIC_MODEL:-claude-opus-5-5}}"
     RALPH_GH_EFFORT="${RALPH_GH_EFFORT:-${CLAUDE_CODE_EFFORT_LEVEL:-}}"
     export RALPH_TELEMETRY_REPO="$RALPH_GH_REPO"
 }
@@ -1262,7 +1262,7 @@ case "${1:-}" in
         echo "  RALPH_GH_SKIP_LABEL        Hold label — issues with this label are deferred (default: empty / disabled)"
         echo "  RALPH_GH_MAIN_BRANCH       Base branch (default: main)"
         echo "  CLAUDE_TIMEOUT_MINUTES     Max time per sub-issue (default: 15)"
-        echo "  RALPH_GH_MODEL             Implementation model (default: ANTHROPIC_MODEL, then claude-opus-5)"
+        echo "  RALPH_GH_MODEL             Implementation model (default: ANTHROPIC_MODEL, then claude-opus-5-5)"
         echo "  RALPH_GH_VERIFIER_MODEL    Independent verifier model (default: claude-sonnet-5)"
         echo "  RALPH_GH_REVIEW_MODEL      Pre-PR review model (default: claude-sonnet-5)"
         echo "  RALPH_GH_VERIFY_CMD        Test/build command run by the shell after each turn (default: .ralph/verify.sh)"
