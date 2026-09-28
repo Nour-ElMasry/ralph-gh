@@ -688,15 +688,30 @@ defer_sub_for_human() {
 
     log_status "WARN" "Sub-issue #$sub_number: terminal block (EXIT_SIGNAL) — deferring for human review, not retrying"
 
-    # Commit any stray uncommitted work so the draft PR carries everything done.
-    git add -A 2>/dev/null || true
-    git commit -m "wip(ralph): work on #$sub_number before human handoff" 2>/dev/null || true
+    # Save stray uncommitted work as a patch instead of committing it. A block
+    # is often *about* that work: on lead-formz #1281 a lint --fix hook rewrote
+    # 35 unrelated files, the agent's revert was denied, and committing them
+    # shipped the junk in the draft PR. The patch outlives the worktree.
+    local patch_note=""
+    if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+        local patch_dir="$HOME/.ralph-gh/runs/issue-${parent_number}"
+        local patch_file
+        patch_file="$patch_dir/uncommitted_${sub_number}_$(date '+%Y%m%d_%H%M%S').patch"
+        mkdir -p "$patch_dir"
+        git add -A 2>/dev/null && git diff --cached --binary > "$patch_file" 2>/dev/null
+        # Stash rather than unstage: abort_group commits a dirty tree with add -A.
+        git stash push --include-untracked -q -m "ralph handoff #$sub_number" 2>/dev/null || true
+        patch_note="
+
+**Uncommitted changes were left out of the PR** and saved to \`$patch_file\` (apply with \`git apply\` if they belong)."
+        log_status "WARN" "Sub-issue #$sub_number: uncommitted changes saved to $patch_file, not committed"
+    fi
 
     comment_on_issue "$RALPH_GH_REPO" "$sub_number" \
         "ralph-gh stopped here: this sub-issue reported a **terminal block** (\`EXIT_SIGNAL: true\`). Retrying won't clear it — a human decision is needed.
 
 **Model recommendation:**
-${recommendation:-(none provided)}
+${recommendation:-(none provided)}${patch_note}
 
 This sub-issue has been flagged for review. Resolve the blocker, then re-trigger parent #$parent_number." || true
 
