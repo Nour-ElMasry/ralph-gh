@@ -43,8 +43,8 @@ _spawn_sub_worker() {
     local sub_issue=$2
     local parent_branch=$3
 
-    local parent_worktree="$WORKTREE_BASE/issue-${parent_issue}"
-    local sub_worktree="$parent_worktree/sub-${sub_issue}"
+    local sub_worktree
+    sub_worktree=$(sub_worktree_path "$parent_issue" "$sub_issue")
     local sub_state_dir="$HOME/.ralph-gh/runs/issue-${parent_issue}/sub-${sub_issue}"
 
     if [[ ! -d "$sub_worktree" ]]; then

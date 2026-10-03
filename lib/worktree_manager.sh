@@ -204,15 +204,28 @@ worktree_cleanup_on_signal() {
 # Sub-worktrees for parallel execution within a parent PRD.
 #
 # Topology when a parent issue has parallel sub-issues:
-#   <repo>/.ralph-workers/issue-<parent>/             ← parent worktree (existing)
-#     ├── node_modules/                                ← installed once at parent
-#     ├── sub-<sub_id_a>/                              ← branched off ralph/issue-<parent>
-#     ├── sub-<sub_id_b>/                              ← branched off ralph/issue-<parent>
-#     └── sub-<sub_id_c>/                              ← created AFTER deps merge
+#   <repo>/.ralph-workers/
+#     ├── issue-<parent>/                  ← parent worktree (node_modules installed once)
+#     ├── issue-<parent>-sub-<sub_id_a>/   ← branched off ralph/issue-<parent>
+#     ├── issue-<parent>-sub-<sub_id_b>/   ← branched off ralph/issue-<parent>
+#     └── issue-<parent>-sub-<sub_id_c>/   ← created AFTER deps merge
+#
+# Sub-worktrees are siblings of the parent worktree, never nested inside it.
+# Nested, every sub showed up as an untracked `sub-<N>/` dir in the parent:
+# the env-file copy walked into sibling subs (committing `sub-<N>/.env.example`
+# into a sub's tree) and the squash-merge of that path was refused by the real
+# `sub-<N>/` directory sitting in the parent's working tree.
 #
 # `cp -al` copies node_modules from the parent worktree into each sub-worktree
 # via hardlinks: zero disk overhead, ~3 s vs. ~2 min `pnpm install`.
 # =============================================================================
+
+# Path of the sub-worktree for one sub-issue of a parent.
+sub_worktree_path() {
+    local parent_issue=$1
+    local sub_issue=$2
+    printf '%s' "$WORKTREE_BASE/issue-${parent_issue}-sub-${sub_issue}"
+}
 
 # Set up a sub-worktree for one sub-issue. Branches `ralph/issue-<parent>-<sub>`
 # off the current parent branch tip.
@@ -222,7 +235,8 @@ sub_worktree_setup() {
     local parent_branch=$3
 
     local parent_worktree="$WORKTREE_BASE/issue-${parent_issue}"
-    local sub_worktree="$parent_worktree/sub-${sub_issue}"
+    local sub_worktree
+    sub_worktree=$(sub_worktree_path "$parent_issue" "$sub_issue")
     local sub_branch="ralph/issue-${parent_issue}-${sub_issue}"
 
     if [[ -d "$sub_worktree" ]]; then
@@ -289,7 +303,8 @@ sub_worktree_cleanup() {
     local outcome=${3:-failure}
 
     local parent_worktree="$WORKTREE_BASE/issue-${parent_issue}"
-    local sub_worktree="$parent_worktree/sub-${sub_issue}"
+    local sub_worktree
+    sub_worktree=$(sub_worktree_path "$parent_issue" "$sub_issue")
     local sub_state_dir="$HOME/.ralph-gh/runs/issue-${parent_issue}/sub-${sub_issue}"
     local sub_branch="ralph/issue-${parent_issue}-${sub_issue}"
 
@@ -431,5 +446,5 @@ sub_worktree_verify_parent() {
 
 export -f worktree_setup worktree_cleanup worktree_cleanup_on_signal
 export -f _worktree_create
-export -f sub_worktree_setup sub_worktree_cleanup
+export -f sub_worktree_path sub_worktree_setup sub_worktree_cleanup
 export -f sub_worktree_merge sub_worktree_verify_parent sub_commit_is_on_parent
