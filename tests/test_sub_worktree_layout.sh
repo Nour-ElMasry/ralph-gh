@@ -51,6 +51,9 @@ main() {
 
     local main_repo="$tmpdir/repo"
     git init --quiet -b main "$main_repo"
+    # HOME is a scratch dir, so the squash commit needs a repo-local identity.
+    git -C "$main_repo" config user.email t@t
+    git -C "$main_repo" config user.name t
     git_t -C "$main_repo" commit --allow-empty -m "initial" --quiet
 
     WORKTREE_BASE="$main_repo/.ralph-workers"
