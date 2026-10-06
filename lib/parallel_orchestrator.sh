@@ -221,8 +221,14 @@ _reap_finished_workers() {
 
         local ec
         if ! ec=$(_worker_exit_code "$parent_issue" "$sub"); then
-            # No exit_code yet — process may have died abnormally
-            log_status "WARN" "Worker for #$sub vanished without exit code; treating as failed"
+            # No exit_code: the worker was interrupted (VM shutdown, SIGKILL,
+            # ralph-gh restart), not a real failure. Requeue it and keep its
+            # worktree + branch so committed work survives into the retry.
+            if with_dag_state_lock dag_state_requeue "$sub"; then
+                log_status "WARN" "Worker for #$sub vanished without exit code; requeuing"
+                continue
+            fi
+            log_status "WARN" "Worker for #$sub vanished without exit code ${RALPH_MAX_REQUEUES}x; treating as failed"
             ec=1
         fi
 

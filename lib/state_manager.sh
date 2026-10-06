@@ -328,6 +328,26 @@ dag_state_mark_failed() {
     save_state "$state"
 }
 
+# Put an interrupted sub (worker died without an exit code — VM shutdown,
+# SIGKILL, ralph-gh restart) back at the front of `ready`. Gives up after
+# RALPH_MAX_REQUEUES interruptions so a worker that dies deterministically
+# can't loop forever. Returns 1 when the cap is hit (caller marks it failed).
+RALPH_MAX_REQUEUES="${RALPH_MAX_REQUEUES:-2}"
+dag_state_requeue() {
+    local sub=$1
+    local state count
+    state=$(load_state)
+    count=$(echo "$state" | jq --arg k "$sub" '.in_progress.dag.requeues[$k] // 0')
+    if (( count >= RALPH_MAX_REQUEUES )); then
+        return 1
+    fi
+    state=$(echo "$state" | jq --argjson s "$sub" --arg k "$sub" \
+        '.in_progress.dag.running -= [$s]
+       | .in_progress.dag.ready = [$s] + (.in_progress.dag.ready - [$s])
+       | .in_progress.dag.requeues[$k] = ((.in_progress.dag.requeues[$k] // 0) + 1)')
+    save_state "$state"
+}
+
 dag_state_running_count() { jq '.in_progress.dag.running | length' "$STATE_FILE" 2>/dev/null; }
 dag_state_ready_count()   { jq '.in_progress.dag.ready   | length' "$STATE_FILE" 2>/dev/null; }
 dag_state_blocked_count() { jq '.in_progress.dag.blocked | length' "$STATE_FILE" 2>/dev/null; }
@@ -372,7 +392,7 @@ export -f mark_parent_processed clear_in_progress is_processed clear_processed
 export -f update_last_poll
 export -f dag_state_init dag_state_get dag_state_active
 export -f dag_state_promote_ready dag_state_cascade_failures
-export -f dag_state_mark_running dag_state_mark_merged dag_state_mark_failed
+export -f dag_state_mark_running dag_state_mark_merged dag_state_mark_failed dag_state_requeue
 export -f dag_state_running_count dag_state_ready_count dag_state_blocked_count dag_state_failed_count
 export -f dag_state_running_subs dag_state_ready_subs dag_state_merged_subs dag_state_failed_subs
 export -f dag_state_pop_ready with_dag_state_lock

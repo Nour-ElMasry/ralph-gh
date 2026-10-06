@@ -239,6 +239,14 @@ sub_worktree_setup() {
     sub_worktree=$(sub_worktree_path "$parent_issue" "$sub_issue")
     local sub_branch="ralph/issue-${parent_issue}-${sub_issue}"
 
+    # Resume an interrupted sub in place: a live worktree already on its branch
+    # keeps uncommitted work, node_modules and env files from the last attempt.
+    if [[ -d "$sub_worktree" ]] && \
+       [[ "$(git -C "$sub_worktree" rev-parse --abbrev-ref HEAD 2>/dev/null)" == "$sub_branch" ]]; then
+        log_status "INFO" "Reusing existing sub-worktree for #$sub_issue at $sub_worktree"
+        return 0
+    fi
+
     if [[ -d "$sub_worktree" ]]; then
         log_status "WARN" "Sub-worktree already exists at $sub_worktree, removing"
         git -C "$parent_worktree" worktree remove "$sub_worktree" --force 2>/dev/null || rm -rf "$sub_worktree"
