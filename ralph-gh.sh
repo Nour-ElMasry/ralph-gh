@@ -470,7 +470,6 @@ process_parent_group() {
     done
 
     complete_group "$parent_number" "$branch_name"
-    return 0
 }
 
 # Build a formatted list of completed sub-issues (used for PRs and comments).
@@ -1090,12 +1089,14 @@ run_command() {
     log_status "INFO" "Skip label: ${RALPH_GH_SKIP_LABEL:-(none)}"
     log_status "INFO" "Main branch: $RALPH_GH_MAIN_BRANCH"
 
+    local failed_issues=()
+
     # Resume in-progress work if any (crash recovery)
     if has_in_progress; then
         local resume_parent
         resume_parent=$(get_in_progress_parent)
         log_status "INFO" "Resuming in-progress work on parent #$resume_parent"
-        process_parent_group
+        process_parent_group || failed_issues+=("$resume_parent")
         cd "$RALPH_GH_WORKSPACE"
         git checkout "$RALPH_GH_MAIN_BRANCH" 2>/dev/null || true
     fi
@@ -1104,16 +1105,29 @@ run_command() {
     if [[ ${#_TARGET_ISSUES[@]} -gt 0 ]]; then
         log_status "INFO" "Processing ${#_TARGET_ISSUES[@]} targeted issue(s) via worktrees: ${_TARGET_ISSUES[*]}"
         for target_num in "${_TARGET_ISSUES[@]}"; do
-            process_targeted_in_worktree "$target_num" || true
+            process_targeted_in_worktree "$target_num" || failed_issues+=("$target_num")
         done
-        log_status "SUCCESS" "Run complete. All targeted issues processed."
     else
         # Process all labeled issues until none remain
         while poll_and_process; do
-            process_parent_group
+            local polled_parent
+            polled_parent=$(get_in_progress_parent)
+            process_parent_group || failed_issues+=("$polled_parent")
             cd "$RALPH_GH_WORKSPACE"
             git checkout "$RALPH_GH_MAIN_BRANCH" 2>/dev/null || true
         done
+    fi
+
+    # A run that ends without its PR is not complete: before this, a refused
+    # push was logged mid-run and the run still closed on SUCCESS (#1306,
+    # 2026-10-06), so finished work sat unpushed on a local branch.
+    if [[ ${#failed_issues[@]} -gt 0 ]]; then
+        log_status "ERROR" "Run finished with failures: $(printf '#%s ' "${failed_issues[@]}")— see the log above"
+        exit 1
+    fi
+    if [[ ${#_TARGET_ISSUES[@]} -gt 0 ]]; then
+        log_status "SUCCESS" "Run complete. All targeted issues processed."
+    else
         log_status "SUCCESS" "Run complete. No more labeled issues to process."
     fi
 }

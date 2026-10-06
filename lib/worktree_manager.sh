@@ -43,10 +43,10 @@ worktree_setup() {
             # Corrupt worktree — remove and recreate
             log_status "WARN" "Corrupt worktree at $worktree_dir, recreating..."
             git -C "$_RALPH_MAIN_WORKSPACE" worktree remove "$worktree_dir" --force 2>/dev/null || rm -rf "$worktree_dir"
-            _worktree_create "$worktree_dir" "$branch_name" "$main_branch"
+            _worktree_create "$worktree_dir" "$branch_name" "$main_branch" || return 1
         fi
     else
-        _worktree_create "$worktree_dir" "$branch_name" "$main_branch"
+        _worktree_create "$worktree_dir" "$branch_name" "$main_branch" || return 1
     fi
 
     # Untracked env files don't materialise via `git worktree add`; test
@@ -106,6 +106,9 @@ _worktree_create() {
     local branch_name=$2
     local main_branch=$3
 
+    _retire_merged_branch "$branch_name" || return 1
+    _sync_local_branch_with_remote "$branch_name" || return 1
+
     # Check if branch exists locally or on remote
     if git -C "$_RALPH_MAIN_WORKSPACE" show-ref --verify --quiet "refs/heads/$branch_name" 2>/dev/null; then
         # Branch exists locally — create worktree using it
@@ -120,6 +123,58 @@ _worktree_create() {
         log_status "INFO" "Creating worktree with new branch $branch_name from $main_branch"
         git -C "$_RALPH_MAIN_WORKSPACE" worktree add "$worktree_dir" -b "$branch_name" "origin/$main_branch" 2>/dev/null
     fi
+}
+
+# A branch whose PR already merged is history, not a resume point. Reusing it
+# built three slices on pre-review code and the push was refused, because a
+# reviewer's fixes had reached only the remote branch (#1306, 2026-10-06). The
+# local branch is kept under ralph-archive/ and the merged remote head deleted,
+# as GitHub's own "delete branch" does, so the run starts fresh from main.
+_retire_merged_branch() {
+    local branch_name=$1
+    local states
+    states=$(gh pr list --repo "$RALPH_GH_REPO" --head "$branch_name" --state all \
+        --json state --jq '[.[].state] | unique | join(",")' 2>/dev/null) || return 0
+    [[ ",$states," == *",MERGED,"* && ",$states," != *",OPEN,"* ]] || return 0
+
+    log_status "WARN" "PR for $branch_name already merged — starting fresh from main instead of resuming it"
+    if git -C "$_RALPH_MAIN_WORKSPACE" show-ref --verify --quiet "refs/heads/$branch_name"; then
+        local archive="ralph-archive/${branch_name#ralph/}-$(date +%Y%m%d_%H%M%S)"
+        if ! git -C "$_RALPH_MAIN_WORKSPACE" branch -m "$branch_name" "$archive" 2>/dev/null; then
+            log_status "ERROR" "Could not archive local $branch_name (checked out somewhere?) — free it and rerun"
+            return 1
+        fi
+        log_status "INFO" "Archived the old local branch as $archive"
+    fi
+    if git -C "$_RALPH_MAIN_WORKSPACE" show-ref --verify --quiet "refs/remotes/origin/$branch_name"; then
+        git -C "$_RALPH_MAIN_WORKSPACE" push origin --delete "$branch_name" >/dev/null 2>&1 || true
+        git -C "$_RALPH_MAIN_WORKSPACE" update-ref -d "refs/remotes/origin/$branch_name"
+    fi
+}
+
+# A local branch behind its remote (someone pushed fixes to the open PR) is
+# fast-forwarded; one that has diverged stops the run before hours of work
+# land on a branch that can never be pushed.
+_sync_local_branch_with_remote() {
+    local branch_name=$1
+    local git_main=(git -C "$_RALPH_MAIN_WORKSPACE")
+    "${git_main[@]}" show-ref --verify --quiet "refs/heads/$branch_name" || return 0
+    "${git_main[@]}" show-ref --verify --quiet "refs/remotes/origin/$branch_name" || return 0
+
+    local local_ref="refs/heads/$branch_name" remote_ref="refs/remotes/origin/$branch_name"
+    if "${git_main[@]}" merge-base --is-ancestor "$remote_ref" "$local_ref"; then
+        return 0
+    fi
+    if "${git_main[@]}" merge-base --is-ancestor "$local_ref" "$remote_ref"; then
+        if ! "${git_main[@]}" branch -f "$branch_name" "$remote_ref" 2>/dev/null; then
+            log_status "ERROR" "Local $branch_name is behind origin and checked out somewhere — pull it and rerun"
+            return 1
+        fi
+        log_status "INFO" "Fast-forwarded local $branch_name to origin"
+        return 0
+    fi
+    log_status "ERROR" "Local $branch_name has diverged from origin/$branch_name — reconcile them by hand before rerunning"
+    return 1
 }
 
 # Clean up a worktree after PR creation (success path)

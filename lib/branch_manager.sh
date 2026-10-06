@@ -88,8 +88,11 @@ push_branch() {
     local branch_name=$1
 
     log_status "INFO" "Pushing branch $branch_name to origin..."
-    git push origin "$branch_name" 2>/dev/null
-    return $?
+    local output
+    if ! output=$(git push origin "$branch_name" 2>&1); then
+        log_status "ERROR" "git push refused: $output"
+        return 1
+    fi
 }
 
 # Open a PR for a completed parent issue group
