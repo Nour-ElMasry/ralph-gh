@@ -11,6 +11,23 @@
 # immediately-prior sub-issue" (= legacy serial behavior). This keeps existing
 # PRDs working unchanged while letting new ones declare fan-out explicitly.
 
+# Print only the `## Sub-Issues` section of an issue body (heading excluded),
+# up to the next level-1/2 heading. Checklists elsewhere in the body (e.g. an
+# acceptance criterion that starts with "#1311's ...") are not sub-issues; a
+# standalone issue was once parsed as a parent of its own blocker that way.
+sub_issues_section() {
+    local body=$1
+    awk '
+        /^##?[[:space:]]/ {
+            heading = tolower($0)
+            sub(/[[:space:]]+$/, "", heading)
+            in_section = (heading ~ /^##?[[:space:]]+sub-issues$/)
+            next
+        }
+        in_section { print }
+    ' <<< "$body"
+}
+
 # Parse a parent issue body into a JSON DAG.
 #
 # Output schema:
@@ -58,7 +75,7 @@ dag_parse_body() {
                 continue
             fi
         fi
-    done <<< "$body"
+    done <<< "$(sub_issues_section "$body")"
 
     # Close out the trailing sub
     if [[ -n "$current_sub" && $saw_deps_for_sub -eq 0 ]]; then
@@ -229,5 +246,5 @@ dag_compute_cascade_failures() {
         '
 }
 
-export -f dag_parse_body dag_validate dag_compute_ready dag_compute_cascade_failures
+export -f sub_issues_section dag_parse_body dag_validate dag_compute_ready dag_compute_cascade_failures
 export -f _dag_record_explicit_deps _dag_record_default_deps

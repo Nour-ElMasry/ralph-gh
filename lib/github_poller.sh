@@ -48,7 +48,7 @@ issue_has_skip_label() {
 parse_task_list() {
     local body=$1
 
-    echo "$body" | grep -oE '\- \[ \] #[0-9]+' | grep -oE '#[0-9]+' | sed 's/#//'
+    sub_issues_section "$body" | grep -oE '\- \[ \] #[0-9]+' | grep -oE '#[0-9]+' | sed 's/#//'
 }
 
 # Parse already-checked items from task list
@@ -56,7 +56,7 @@ parse_task_list() {
 parse_completed_tasks() {
     local body=$1
 
-    echo "$body" | grep -oE '\- \[[xX]\] #[0-9]+' | grep -oE '#[0-9]+' | sed 's/#//'
+    sub_issues_section "$body" | grep -oE '\- \[[xX]\] #[0-9]+' | grep -oE '#[0-9]+' | sed 's/#//'
 }
 
 # Parse the issue body into a DAG (subs + dependency graph). Echoes JSON like:

@@ -86,7 +86,9 @@ assert_jq_eq "Empty body → empty DAG" \
     "$result4"
 
 # Test 5: Single sub-issue
-body5='- [ ] #99 only one
+body5='## Sub-Issues
+
+- [ ] #99 only one
   depends_on: []
 '
 result5=$(dag_parse_body "$body5")
@@ -95,7 +97,9 @@ assert_jq_eq "Single sub-issue" \
     "$result5"
 
 # Test 6: depends_on with single dep, no leading #
-body6='- [ ] #10 first
+body6='## Sub-Issues
+
+- [ ] #10 first
   depends_on: []
 - [ ] #20 second
   depends_on: [10]
@@ -106,7 +110,9 @@ assert_jq_eq "depends_on tolerates missing # prefix" \
     "$result6"
 
 # Test 7: Already-checked items still parsed
-body7='- [x] #5 done
+body7='## Sub-Issues
+
+- [x] #5 done
 - [ ] #6 todo
   depends_on: [#5]
 '
@@ -114,6 +120,20 @@ result7=$(dag_parse_body "$body7")
 assert_jq_eq "Checked items still appear in DAG" \
     '{"subs":[5,6],"deps":{"5":[],"6":[5]}}' \
     "$result7"
+
+# Test 7b: Checklists outside ## Sub-Issues are ignored (#1364 shape)
+body7b='## Sub-Issues
+
+- [ ] #7 slice
+
+## Acceptance criteria
+
+- [ ] #1311'"'"'s paid-plan specs still pass unchanged
+'
+result7b=$(dag_parse_body "$body7b")
+assert_jq_eq "Acceptance criterion naming an issue is not a sub" \
+    '{"subs":[7],"deps":{"7":[]}}' \
+    "$result7b"
 
 echo ""
 echo "=== DAG Validator Tests ==="
