@@ -102,6 +102,7 @@ build_verifier_prompt() {
     local diff_file=$4
     local sub_start_ref=$5
     local untracked=$6
+    local verify_cmd=$7
 
     cat <<PROMPT
 ## Role: independent verifier
@@ -127,6 +128,7 @@ plus working tree) is saved at:
 Read it first. Then open any file you need to confirm behaviour. You may also
 run \`git diff ${sub_start_ref} -- <path>\`, \`git log\`, and \`git show\`.
 $( [[ -n "$untracked" ]] && printf '\nNew untracked files (not in the diff, read them directly):\n\n%s\n' "$(printf '%s\n' "$untracked" | sed 's/^/    /')" )
+$( [[ -n "$verify_cmd" ]] && printf '\n## What the shell already ran\n\nJust before you started, the shell ran `%s` on this exact tree and it\nexited 0. Read that script to see which commands it runs. A criterion that\nonly asks for one of those commands to pass (typecheck, build, lint, test) is\nmet: cite the script line that runs it. If the script does not run the\ncommand a criterion names, the criterion is not met; say the verify script\ndoes not run it.\n' "$verify_cmd" )
 
 ## How to grade
 
@@ -190,7 +192,9 @@ run_verifier_gate() {
     fi
 
     local prompt
-    prompt=$(build_verifier_prompt "$sub_number" "$sub_title" "$sub_body" "$diff_file" "$sub_start_ref" "$untracked")
+    # Callers run this only after run_verify_gate went green on the same tree.
+    prompt=$(build_verifier_prompt "$sub_number" "$sub_title" "$sub_body" "$diff_file" "$sub_start_ref" "$untracked" \
+        "$(resolve_verify_cmd "$workspace")")
 
     local output_file="$state_dir/logs/verifier_${sub_number}_${stamp}.log"
     local stderr_file="$state_dir/logs/verifier_${sub_number}_${stamp}.stderr.log"

@@ -283,6 +283,11 @@ assert_contains "stats shows outcome" "pr_opened" "$stats"
 assert_contains "stats totals line" "claude calls" "$stats"
 assert_eq "stats for unknown repo is empty table" "0" "$(telemetry_stats "nope/nope" | grep -c pr_opened)"
 
+# The verifier is read-only, so a "typecheck passes" criterion deadlocked it
+# (#1377). It must be told the verify command already ran green.
+prompt=$(build_verifier_prompt 1 "t" "body" "/tmp/d.patch" "abc" "" "bash /w/.ralph/verify.sh")
+assert_contains "verifier prompt names the green verify command" 'ran `bash /w/.ralph/verify.sh` on this exact tree' "$prompt"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
