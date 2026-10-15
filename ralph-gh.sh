@@ -834,7 +834,7 @@ process_targeted_issue() {
             local dag_json
             if dag_json=$(parse_task_dag "$body"); then
                 if dag_has_parallelism "$dag_json"; then
-                    dag_state_init "$dag_json"
+                    dag_state_init "$dag_json" "$(printf '%s\n' "${valid_sub_array[@]}" | jq -sc 'map(tonumber)')"
                     log_status "INFO" "DAG with parallelism detected for parent #$issue_number"
                 fi
             else
@@ -951,7 +951,7 @@ poll_and_process() {
             local dag_json
             if dag_json=$(parse_task_dag "$body"); then
                 if dag_has_parallelism "$dag_json"; then
-                    dag_state_init "$dag_json"
+                    dag_state_init "$dag_json" "$(printf '%s\n' "${valid_sub_array[@]}" | jq -sc 'map(tonumber)')"
                     log_status "INFO" "DAG with parallelism detected for parent #$num"
                 fi
             else

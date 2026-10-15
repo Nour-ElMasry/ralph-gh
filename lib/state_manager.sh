@@ -218,25 +218,28 @@ update_last_poll() {
 # work via the old serial loop.
 # =============================================================================
 
-# Initialize .in_progress.dag from a raw dag JSON. All subs start `blocked`;
+# Initialize .in_progress.dag from a raw dag JSON. Open subs start `blocked`;
 # the scheduler then promotes zero-dep subs to `ready` via dag_state_promote_ready.
+# Args: $1 = DAG JSON, $2 = JSON array of the open subs this run should work.
+# The DAG keeps closed/ticked subs because open subs name them in depends_on,
+# so they start `merged`. Starting them `blocked` re-ran shipped work, which
+# exits non-zero with no diff and cascade-failed every dependent (#1370).
 dag_state_init() {
     local dag_json=$1
-    local subs_json
-    subs_json=$(echo "$dag_json" | jq '.subs')
+    local open_subs_json=$2
 
     local state
     state=$(load_state)
     state=$(echo "$state" | jq \
         --argjson dag "$dag_json" \
-        --argjson subs "$subs_json" \
+        --argjson open "$open_subs_json" \
         '.in_progress.dag = {
             "raw": $dag,
             "ready":   [],
             "running": [],
-            "merged":  [],
+            "merged":  [$dag.subs[] | select(. as $s | $open | index($s) == null)],
             "failed":  [],
-            "blocked": $subs
+            "blocked": [$dag.subs[] | select(. as $s | $open | index($s) != null)]
         }')
     save_state "$state"
 }

@@ -202,6 +202,15 @@ assert_jq_eq "Cascade failure when dep failed" '[524]' "$cascaded"
 cascaded2=$(dag_compute_cascade_failures "$dag" '[]' '[523,524]')
 assert_jq_eq "No cascade with no failures" '[]' "$cascaded2"
 
+# Test 17: closed subs start merged, so their dependents can promote
+source "$SCRIPT_DIR/lib/state_manager.sh"
+STATE_FILE=$(mktemp)
+echo '{"in_progress":{}}' > "$STATE_FILE"
+dag_state_init "$dag" '[524]'
+assert_jq_eq "Closed subs start merged" '[522,523]' "$(jq -c '.in_progress.dag.merged' "$STATE_FILE")"
+assert_jq_eq "Only open subs start blocked" '[524]' "$(jq -c '.in_progress.dag.blocked' "$STATE_FILE")"
+rm -f "$STATE_FILE"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 echo ""
