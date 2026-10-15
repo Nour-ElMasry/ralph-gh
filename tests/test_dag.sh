@@ -211,6 +211,22 @@ assert_jq_eq "Closed subs start merged" '[522,523]' "$(jq -c '.in_progress.dag.m
 assert_jq_eq "Only open subs start blocked" '[524]' "$(jq -c '.in_progress.dag.blocked' "$STATE_FILE")"
 rm -f "$STATE_FILE"
 
+# Test 18: resuming a run whose subs all failed (#1370 after a crash): the
+# closed sub counts as merged, the open ones are scheduled again.
+source "$SCRIPT_DIR/lib/parallel_orchestrator.sh"
+log_status() { :; }
+validate_sub_issues() { echo 523; echo 524; }
+STATE_FILE=$(mktemp)
+echo '{"in_progress":{"completed_subs":[],"remaining_subs":[524],"dag":{"raw":'"$dag"',"ready":[],"running":[],"merged":[],"failed":[522,523,524],"blocked":[]}}}' > "$STATE_FILE"
+DAG_STATE_LOCK="$STATE_FILE.lock"
+_retry_failed_subs
+dag_state_promote_ready >/dev/null
+assert_jq_eq "Resume clears failed" '[]' "$(jq -c '.in_progress.dag.failed' "$STATE_FILE")"
+assert_jq_eq "Resume counts closed failed sub as merged" '[522]' "$(jq -c '.in_progress.dag.merged' "$STATE_FILE")"
+assert_jq_eq "Resume schedules open failed subs" '[523]' "$(jq -c '.in_progress.dag.ready' "$STATE_FILE")"
+assert_jq_eq "Resume puts retried subs back in remaining" '[523,524]' "$(jq -c '.in_progress.remaining_subs' "$STATE_FILE")"
+rm -f "$STATE_FILE" "$DAG_STATE_LOCK"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 echo ""

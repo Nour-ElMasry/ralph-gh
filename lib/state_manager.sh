@@ -331,6 +331,26 @@ dag_state_mark_failed() {
     save_state "$state"
 }
 
+# Resume: give every failed sub another go. Open ones go back to `blocked`
+# (dependents that cascade-failed with them come back too); closed ones
+# shipped some other way, so they count as merged.
+# Args: $1 = JSON array of the failed subs whose issues are still open.
+dag_state_retry_failed() {
+    local open_json=$1
+    local state
+    state=$(load_state)
+    state=$(echo "$state" | jq --argjson open "$open_json" \
+        '.in_progress.dag.failed as $f
+       | ([$f[] | select(. as $s | $open | index($s) != null)]) as $retry
+       | ([$f[] | select(. as $s | $open | index($s) == null)]) as $done
+       | .in_progress.dag.failed = []
+       | .in_progress.dag.blocked += $retry
+       | .in_progress.dag.merged += $done
+       | .in_progress.completed_subs += $done
+       | .in_progress.remaining_subs = (.in_progress.remaining_subs + $retry | unique)')
+    save_state "$state"
+}
+
 # Put an interrupted sub (worker died without an exit code — VM shutdown,
 # SIGKILL, ralph-gh restart) back at the front of `ready`. Gives up after
 # RALPH_MAX_REQUEUES interruptions so a worker that dies deterministically
@@ -395,7 +415,7 @@ export -f mark_parent_processed clear_in_progress is_processed clear_processed
 export -f update_last_poll
 export -f dag_state_init dag_state_get dag_state_active
 export -f dag_state_promote_ready dag_state_cascade_failures
-export -f dag_state_mark_running dag_state_mark_merged dag_state_mark_failed dag_state_requeue
+export -f dag_state_mark_running dag_state_mark_merged dag_state_mark_failed dag_state_requeue dag_state_retry_failed
 export -f dag_state_running_count dag_state_ready_count dag_state_blocked_count dag_state_failed_count
 export -f dag_state_running_subs dag_state_ready_subs dag_state_merged_subs dag_state_failed_subs
 export -f dag_state_pop_ready with_dag_state_lock

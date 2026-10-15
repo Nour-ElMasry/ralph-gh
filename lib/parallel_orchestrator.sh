@@ -364,6 +364,25 @@ _finalize_sub_outcome() {
     fi
 }
 
+# Resume support: move failed subs out of `failed` before scheduling. Asks
+# GitHub which are still open; if that lookup fails, leave state untouched.
+_retry_failed_subs() {
+    local failed
+    mapfile -t failed < <(dag_state_failed_subs)
+    (( ${#failed[@]} > 0 )) || return 0
+
+    local open
+    if ! open=$(validate_sub_issues "$RALPH_GH_REPO" "${failed[@]}"); then
+        log_status "WARN" "Resume: could not look up failed subs ${failed[*]}; leaving them failed"
+        return 0
+    fi
+
+    local open_json
+    open_json=$(printf '%s\n' $open | jq -sc 'map(tonumber)')
+    with_dag_state_lock dag_state_retry_failed "$open_json"
+    log_status "INFO" "Resume: retrying failed subs ${failed[*]} (open: $(jq -r 'join(" ")' <<< "$open_json"))"
+}
+
 # Resume support: for each sub currently in the `blocked` bucket, check
 # whether the parent branch already has its squash commit. If so, move it to
 # `merged` (and `completed_subs`) so dependents can promote.
@@ -476,6 +495,11 @@ parallel_process_dag() {
     # Reset per-run reconciler counter (this scheduler call is one "run").
     _RALPH_RECONCILE_FAILURES=0
 
+    # Resume case: a sub that failed in an earlier run (crash, ralph-gh bug,
+    # flaky gate) would otherwise stay failed forever and cascade-fail its
+    # dependents. Re-running is the user asking for another attempt.
+    _retry_failed_subs
+
     # Resume case: if the parent branch already contains squash commits for
     # some subs (e.g. a prior run got partway and we're picking back up), seed
     # them into the merged bucket so dependents can promote on the first tick.
@@ -527,4 +551,4 @@ export -f parallel_process_dag
 export -f _spawn_sub_worker _worker_alive _worker_exit_code
 export -f _reap_finished_workers _merge_one_sub _spawn_up_to_capacity
 export -f _try_reconcile_or_finalize _finalize_sub_outcome _cleanup_parent_worktree
-export -f _seed_merged_from_branch _dag_state_seed_merged
+export -f _seed_merged_from_branch _dag_state_seed_merged _retry_failed_subs
