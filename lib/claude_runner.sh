@@ -82,8 +82,10 @@ claude_build_args() {
         unset IFS
     fi
 
-    if [[ "$sys_mode" != "nosys" && -f "$workspace/.ralph/PROMPT.md" ]]; then
-        printf '%s\n' "--append-system-prompt-file" "$workspace/.ralph/PROMPT.md"
+    # QA mode swaps the implementer's conventions (TDD, commits) for its own.
+    local sys_prompt_file="${RALPH_GH_SYSTEM_PROMPT_FILE:-$workspace/.ralph/PROMPT.md}"
+    if [[ "$sys_mode" != "nosys" && -f "$sys_prompt_file" ]]; then
+        printf '%s\n' "--append-system-prompt-file" "$sys_prompt_file"
     fi
 
     [[ -n "$model" ]] && printf '%s\n' "--model" "$model"

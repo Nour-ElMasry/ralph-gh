@@ -23,6 +23,7 @@ source "$SCRIPT_DIR/lib/telemetry.sh"
 source "$SCRIPT_DIR/lib/claude_runner.sh"
 source "$SCRIPT_DIR/lib/verify_gate.sh"
 source "$SCRIPT_DIR/lib/resource_caps.sh"
+source "$SCRIPT_DIR/lib/qa_runner.sh"
 
 # =============================================================================
 # DEFAULTS
@@ -878,6 +879,10 @@ poll_and_process() {
         fi
     fi
 
+    # QA plans are executed by `ralph-gh qa`, never implemented.
+    issues_json=$(echo "$issues_json" | jq --arg qa "$RALPH_QA_LABEL" \
+        'map(select(([.labels[].name] | index($qa)) == null))')
+
     if [[ "$issues_json" == "[]" ]]; then
         log_status "INFO" "No eligible issues after skip-label filter"
         update_last_poll
@@ -981,6 +986,15 @@ process_targeted_in_worktree() {
     if issue_has_skip_label "$RALPH_GH_REPO" "$issue_number"; then
         log_status "INFO" "Skipping targeted #$issue_number — has hold label '$RALPH_GH_SKIP_LABEL'"
         return 0
+    fi
+
+    local target_labels
+    target_labels=$(gh issue view "$issue_number" --repo "$RALPH_GH_REPO" --json labels \
+        --jq '[.labels[].name]' < /dev/null 2>/dev/null) || target_labels='[]'
+    if qa_labels_hit "$target_labels" "$RALPH_QA_LABEL"; then
+        log_status "INFO" "#$issue_number is a QA plan — handing it to QA mode"
+        qa_main "$issue_number"
+        return $?
     fi
 
     log_status "INFO" "Setting up worktree for issue #$issue_number..."
@@ -1132,6 +1146,27 @@ run_command() {
     fi
 }
 
+# Execute QA plans (see lib/qa_runner.sh). Same config, slice and environment
+# checks as `run`; one QA run at a time per workspace, because every plan
+# shares the one long-lived stack.
+qa_command() {
+    load_config
+    cgroup_reexec_in_slice "$SCRIPT_DIR/ralph-gh.sh" "${_RALPH_ARGV[@]}"
+    validate_environment
+    cd "$RALPH_GH_WORKSPACE"
+
+    local lock_file="$RALPH_GH_STATE_DIR/.qa-lock"
+    exec 7>"$lock_file"
+    if ! flock -n 7; then
+        log_status "ERROR" "Another ralph-gh QA run is already using this workspace's stack (lock: $lock_file)"
+        exit 1
+    fi
+    trap 'log_status "WARN" "Caught signal, shutting down..."; kill 0 2>/dev/null; exit 130' INT TERM
+
+    log_status "INFO" "QA mode — repo $RALPH_GH_REPO, labels '$RALPH_GH_LABEL' + '$RALPH_QA_LABEL'"
+    qa_main "${_TARGET_ISSUES[@]}" || exit 1
+}
+
 # =============================================================================
 # CLI
 # =============================================================================
@@ -1181,6 +1216,19 @@ case "${1:-}" in
             esac
         done
         run_command
+        ;;
+    qa)
+        shift
+        _TARGET_ISSUES=()
+        for _arg in "$@"; do
+            if [[ "$_arg" =~ ^[0-9]+$ ]]; then
+                _TARGET_ISSUES+=("$_arg")
+            else
+                echo "Usage: ralph-gh qa [ISSUE_NUMBER ...]"
+                exit 1
+            fi
+        done
+        qa_command
         ;;
     --status)
         load_config
@@ -1268,6 +1316,8 @@ case "${1:-}" in
         echo "Commands:"
         echo "  setup [OWNER/REPO]                              Create 'ralph' label (auto-detects repo)"
         echo "  run [--label L] [--skip-label L] [ISSUE ...]    Process issues and exit"
+        echo "  qa [ISSUE ...]                                  Execute QA plans (labels ralph + qa): post proof, file bugs"
+        echo "                                                  A parent issue expands to its Sub-Issues list"
         echo ""
         echo "  When issue numbers are given, ralph works on those specific issues"
         echo "  (no label required) in isolated git worktrees. Without issue numbers,"

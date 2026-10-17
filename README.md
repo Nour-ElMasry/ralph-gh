@@ -224,6 +224,36 @@ proceeds uncapped with a `WARN`.
 
 **Priority:** defaults < global config < `.ralphrc` < environment variables
 
+## QA mode
+
+`ralph-gh qa [ISSUE ...]` executes test plans instead of implementing them. A plan is an open issue labelled `ralph` + `qa` whose scenarios look like `- [ ] **QA-05.01** <behaviour>`. With no arguments it runs every such plan in programme order (`QA-00`, `QA-01`, …, `QA-18a`, lettered tracks like `QA-H1` last). A parent issue argument expands to the unchecked plans in its `## Sub-Issues` list. `ralph-gh run` hands `qa` issues over to this mode, and its label poll never picks them up.
+
+Per run:
+
+1. The shell checks out `origin/main` at `.ralph-workers/qa-stack` and runs `$RALPH_QA_STACK_CMD up`. That checkout sits outside every plan worktree, so the per-turn orphan reaper never kills the stack.
+2. For each plan, it runs `$RALPH_QA_STACK_CMD reset --seed $RALPH_QA_SEED`, then gives the model the plan, with `.ralph/QA_PROMPT.md` as its system prompt and a structured schema. The model may not file issues, comment, commit or push.
+3. The gate is **every scenario executed with evidence**: PASS/FAIL need an evidence file that exists under `$QA_EVIDENCE_DIR`, FAIL needs a complete bug, BLOCKED needs `blocked_by`. The gate does not require scenarios to pass, so a failing product never loops the model.
+4. The shell then:
+   - pushes the evidence to the orphan `qa-evidence` branch;
+   - files one bug per new FAIL (`bug`, `qa-found`, `sev:<blocker|major|minor>`), or comments on the open bug the model named as a duplicate;
+   - posts a proof comment (verdict table plus inline screenshots);
+   - ticks the PASS scenario boxes and rewrites the plan's `## Blocked by` list.
+5. An all-green plan is closed and checked off on its `Parent QA #N`. Otherwise it stays open without the `ralph` label until a human re-adds it, and the whole plan reruns.
+
+A smoke plan (`RALPH_QA_SMOKE_PLAN_ID`, default `QA-00`) that is not green stops the run. So does a broken stack.
+
+| Variable | Default | |
+|---|---|---|
+| `RALPH_QA_LABEL` | `qa` | Second label that marks a plan |
+| `RALPH_QA_SKIP_LABELS` | `hitl` | Plans carrying any of these never run |
+| `RALPH_QA_STACK_CMD` | `scripts/qa-stack.sh` | Must support `up` and `reset --seed <name>` |
+| `RALPH_QA_ENV_FILE` | — | Secrets for the stack (e.g. a Stripe test key), exported as `QA_ENV_FILE` |
+| `RALPH_QA_MAX_LOOPS` | `4` | Turns per plan before unfinished scenarios are reported NOT RUN |
+| `RALPH_QA_TIMEOUT_MINUTES` | `CLAUDE_TIMEOUT_MINUTES` | Per-turn wall clock |
+| `RALPH_QA_EVIDENCE_BRANCH` | `qa-evidence` | Orphan branch for screenshots and traces |
+| `RALPH_QA_EVIDENCE_MAX_MB` | `25` | Larger files are not published |
+| `RALPH_QA_ALLOWED_TOOLS` | curl, jq, node, pnpm, npx, gh issue list/view, stripe, k6, the stack command | Pre-approved tools for QA turns |
+
 ## Safety
 
 Ralph is designed to be **conservative, not clever**.
