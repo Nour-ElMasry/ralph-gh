@@ -162,6 +162,7 @@ echo "=== qa_labels_hit ==="
 qa_labels_hit '["ralph","qa"]' "qa"; assert_eq "label present" "0" "$?"
 qa_labels_hit '["ralph"]' "hitl,qa"; assert_eq "label absent" "1" "$?"
 qa_labels_hit '["hitl"]' "hitl,"; assert_eq "trailing comma tolerated" "0" "$?"
+qa_labels_hit '["ralph","QA"]' "qa"; assert_eq "label match ignores case" "0" "$?"
 
 echo "=== qa_collect_plans (mocked gh) ==="
 gh() {

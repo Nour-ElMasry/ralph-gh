@@ -290,7 +290,8 @@ qa_render_bug() {
 # comma-separated label list.
 qa_labels_hit() {
     local labels_json=$1 wanted=$2
-    jq -e --arg w "$wanted" '($w | split(",") | map(select(length > 0))) as $ws | any(.[]; . as $l | $ws | index($l))' \
+    # GitHub label names are case-insensitive: `--label qa` matches "QA".
+    jq -e --arg w "$wanted" '($w | ascii_downcase | split(",") | map(select(length > 0))) as $ws | any(.[]; ascii_downcase as $l | $ws | index($l))' \
         <<< "$labels_json" >/dev/null 2>&1
 }
 

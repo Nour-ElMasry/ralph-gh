@@ -881,7 +881,7 @@ poll_and_process() {
 
     # QA plans are executed by `ralph-gh qa`, never implemented.
     issues_json=$(echo "$issues_json" | jq --arg qa "$RALPH_QA_LABEL" \
-        'map(select(([.labels[].name] | index($qa)) == null))')
+        'map(select(([.labels[].name | ascii_downcase] | index($qa | ascii_downcase)) == null))')
 
     if [[ "$issues_json" == "[]" ]]; then
         log_status "INFO" "No eligible issues after skip-label filter"
