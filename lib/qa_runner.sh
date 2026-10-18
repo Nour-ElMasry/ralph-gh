@@ -451,7 +451,8 @@ qa_file_bugs() {
         dup=$(jq -r '.bug.duplicate_of // empty' <<< "$r")
         [[ -z "$dup" ]] && dup=${filed_by_title[$bug_title]:-}
         if [[ -n "$dup" ]]; then
-            comment_on_issue "$repo" "$dup" "Seen again by #$plan · **$id** in QA run \`$run_id\` on \`${sha:0:10}\`."$'\n\n'"$(qa_render_evidence "$repo" "$commit" "$base" "$r")" || true
+            # stdout is this function's JSON result, and `gh issue comment` prints a URL.
+            comment_on_issue "$repo" "$dup" "Seen again by #$plan · **$id** in QA run \`$run_id\` on \`${sha:0:10}\`."$'\n\n'"$(qa_render_evidence "$repo" "$commit" "$base" "$r")" >/dev/null || true
             num=$dup
         else
             local sev labels

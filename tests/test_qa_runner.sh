@@ -218,7 +218,8 @@ LOG_DIR=$(mktemp -d)
 GH_CREATES=0
 gh() { [[ "$1 $2" == "issue create" ]] && { GH_CREATES=$((GH_CREATES + 1)); echo "https://github.com/o/r/issues/$((900 + GH_CREATES))"; }; }
 COMMENTED="$LOG_DIR/commented"
-comment_on_issue() { echo "$2" >> "$COMMENTED"; }
+# Like `gh issue comment`, the real one prints the comment URL on stdout.
+comment_on_issue() { echo "$2" >> "$COMMENTED"; echo "https://github.com/o/r/issues/$2#issuecomment-1"; }
 qa_render_bug() { :; }
 qa_render_evidence() { :; }
 DUP_SCEN=$'QA-04.13\tRestore\nQA-04.19\tArchive'
