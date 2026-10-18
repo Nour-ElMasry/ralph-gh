@@ -366,7 +366,9 @@ qa_stack_up() {
     fi
 
     log_status "INFO" "QA: bringing the stack up from $QA_STACK_DIR" >&2
-    if ! (cd "$QA_STACK_DIR" && "$QA_STACK_CMD_ABS" up) >> "$LOG_DIR/qa-stack.log" 2>&1; then
+    # 7>&- on every child that can start the stack: daemons that inherit the
+    # run's flock fd (ralph-gh.sh qa_command) hold .qa-lock after the run exits.
+    if ! (cd "$QA_STACK_DIR" && "$QA_STACK_CMD_ABS" up 7>&-) >> "$LOG_DIR/qa-stack.log" 2>&1; then
         log_status "ERROR" "QA: '$RALPH_QA_STACK_CMD up' failed — see $LOG_DIR/qa-stack.log" >&2
         return 1
     fi
@@ -374,7 +376,7 @@ qa_stack_up() {
 }
 
 qa_stack_reset() {
-    (cd "$QA_STACK_DIR" && "$QA_STACK_CMD_ABS" reset --seed "$RALPH_QA_SEED") >> "$LOG_DIR/qa-stack.log" 2>&1
+    (cd "$QA_STACK_DIR" && "$QA_STACK_CMD_ABS" reset --seed "$RALPH_QA_SEED" 7>&-) >> "$LOG_DIR/qa-stack.log" 2>&1
 }
 
 # Push a plan run's evidence to the orphan evidence branch without a worktree:
@@ -524,7 +526,7 @@ qa_run_plan() {
         local out="$state_dir/turn-$loop.json" err="$state_dir/turn-$loop.err" rc=0
         run_claude "$worktree" "$(qa_build_prompt "$plan" "$title" "$body" "$evidence_dir" "$retry_context")" \
             "$out" "$err" "$((timeout_minutes * 60))" "$RALPH_GH_MODEL" "$QA_SCHEMA" \
-            "$session_id" "$allowed" "" "qa" || rc=$?
+            "$session_id" "$allowed" "" "qa" 7>&- || rc=$?
         session_id=$RALPH_LAST_SESSION_ID
 
         local so
