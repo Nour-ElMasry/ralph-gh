@@ -155,6 +155,13 @@ validate_environment() {
         errors=$((errors + 1))
     fi
 
+    local foreign_changes
+    if foreign_changes=$(workspace_foreign_changes "$RALPH_GH_WORKSPACE"); then
+        log_status "ERROR" "Workspace has uncommitted changes ralph did not make; commit or move them first:"
+        printf '%s\n' "$foreign_changes" >&2
+        errors=$((errors + 1))
+    fi
+
     if [[ $errors -gt 0 ]]; then
         log_status "ERROR" "Validation failed with $errors error(s). Exiting."
         exit 1

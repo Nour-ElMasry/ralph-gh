@@ -3,6 +3,23 @@
 # branch_manager.sh - Git branch, commit, and PR management for ralph-gh
 
 # Ensure we're on the latest main branch
+# Print the workspace's uncommitted changes and succeed when they are not
+# ralph's own. `ensure_latest_main` checks out main with the tree as it is, so
+# a user's edits ride onto the work branch and the first `git add -A` commits
+# them (#1488, 2026-10-18: marketing files swept into an SMTP slice, then
+# "reverted" by the review pass, which deleted them from the user's tree).
+# Dirt on a ralph/* branch is a resumed run's own work and is left alone.
+#   $1 = workspace path
+workspace_foreign_changes() {
+    local workspace=${1:-.}
+    local branch changes
+    branch=$(git -C "$workspace" rev-parse --abbrev-ref HEAD 2>/dev/null) || return 1
+    [[ "$branch" == ralph/* ]] && return 1
+    changes=$(git -C "$workspace" status --porcelain 2>/dev/null)
+    [[ -z "$changes" ]] && return 1
+    printf '%s\n' "$changes"
+}
+
 ensure_latest_main() {
     local main_branch="${1:-main}"
 
@@ -237,5 +254,5 @@ EOF
     fi
 }
 
-export -f ensure_latest_main create_branch commit_changes push_branch resolve_sub_start_ref
+export -f workspace_foreign_changes ensure_latest_main create_branch commit_changes push_branch resolve_sub_start_ref
 export -f open_pr open_draft_pr find_open_pr_number update_pr_text
