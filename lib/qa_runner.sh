@@ -437,14 +437,19 @@ qa_ensure_labels() {
 # {"QA-05.03": 1234} for the proof comment and the Blocked-by list.
 qa_file_bugs() {
     local repo=$1 plan=$2 run_id=$3 sha=$4 scenarios=$5 results=$6 commit=$7 base=$8
-    local bugs='{}' id title r dup url num
+    local bugs='{}' id title r dup url num bug_title
+    # The agent marks cross-plan duplicates itself (bug.duplicate_of); two FAILs
+    # of one run with the same bug title are caught here (#1557/#1558).
+    local -A filed_by_title=()
     while IFS=$'\t' read -r id title; do
         [[ -z "$id" ]] && continue
         r=$(jq -c --arg id "$id" '.[$id] // empty' <<< "$results")
         [[ -z "$r" ]] && continue
         [[ "$(jq -r '.result' <<< "$r")" == "FAIL" ]] || continue
 
+        bug_title=$(jq -r '.bug.title' <<< "$r")
         dup=$(jq -r '.bug.duplicate_of // empty' <<< "$r")
+        [[ -z "$dup" ]] && dup=${filed_by_title[$bug_title]:-}
         if [[ -n "$dup" ]]; then
             comment_on_issue "$repo" "$dup" "Seen again by #$plan · **$id** in QA run \`$run_id\` on \`${sha:0:10}\`."$'\n\n'"$(qa_render_evidence "$repo" "$commit" "$base" "$r")" || true
             num=$dup
@@ -453,7 +458,7 @@ qa_file_bugs() {
             sev=$(jq -r '.bug.severity' <<< "$r")
             labels="$RALPH_QA_BUG_LABELS,sev:$sev"
             url=$(gh issue create --repo "$repo" \
-                --title "[$id] $(jq -r '.bug.title' <<< "$r")" \
+                --title "[$id] $bug_title" \
                 --label "$labels" \
                 --body "$(qa_render_bug "$repo" "$plan" "$id" "$title" "$run_id" "$sha" "$r" "$commit" "$base")" \
                 < /dev/null 2>>"$LOG_DIR/qa-gh.log") || url=""
@@ -463,6 +468,7 @@ qa_file_bugs() {
                 continue
             fi
             log_status "INFO" "QA: filed #$num for $id ($sev)" >&2
+            filed_by_title[$bug_title]=$num
         fi
         bugs=$(jq -c --arg id "$id" --argjson n "$num" '. + {($id): $n}' <<< "$bugs")
     done <<< "$scenarios"

@@ -213,6 +213,21 @@ RALPH_QA_EVIDENCE_MAX_MB=1 qa_publish_evidence "$WS" "$EV" "1505/run3" >/dev/nul
 assert_eq "oversized evidence is skipped" "0" \
     "$(git -C "$REMOTE" ls-tree -r --name-only qa-evidence | grep -c 'run3/.*huge.webm')"
 
+echo "qa_file_bugs"
+LOG_DIR=$(mktemp -d)
+GH_CREATES=0
+gh() { [[ "$1 $2" == "issue create" ]] && { GH_CREATES=$((GH_CREATES + 1)); echo "https://github.com/o/r/issues/$((900 + GH_CREATES))"; }; }
+COMMENTED="$LOG_DIR/commented"
+comment_on_issue() { echo "$2" >> "$COMMENTED"; }
+qa_render_bug() { :; }
+qa_render_evidence() { :; }
+DUP_SCEN=$'QA-04.13\tRestore\nQA-04.19\tArchive'
+DUP_RES='{"QA-04.13":{"result":"FAIL","bug":{"title":"POSTs answer 201","severity":"minor"}},"QA-04.19":{"result":"FAIL","bug":{"title":"POSTs answer 201","severity":"minor"}}}'
+DUP_MAP=$(qa_file_bugs o/r 1499 run sha "$DUP_SCEN" "$DUP_RES" c base 2>/dev/null)
+assert_eq "a repeated bug title in one run maps both scenarios to one issue" '{"QA-04.13":901,"QA-04.19":901}' "$DUP_MAP"
+assert_eq "the repeat cross-references instead of filing" "901" "$(cat "$COMMENTED")"
+unset -f gh comment_on_issue
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]
