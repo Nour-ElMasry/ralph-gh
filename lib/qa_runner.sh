@@ -332,14 +332,20 @@ RULES
 # SIDE EFFECTS
 # =============================================================================
 
-# Ensure the long-lived stack checkout exists at the tip of main and the stack
-# is up. Outside every plan worktree, so the per-turn orphan reaper never
-# touches it. Echoes the sha under test.
-qa_stack_up() {
+# The stack checkout's paths. Must run in the caller's shell, not inside
+# $(qa_stack_up), or the reset and the agent prompt never see them.
+qa_stack_paths() {
     local main_ws=$1
     QA_STACK_DIR="$main_ws/.ralph-workers/qa-stack"
     QA_STACK_CMD_ABS="$QA_STACK_DIR/$RALPH_QA_STACK_CMD"
     export QA_STACK_DIR QA_STACK_CMD="$QA_STACK_CMD_ABS"
+}
+
+# Ensure the long-lived stack checkout exists at the tip of main and the stack
+# is up. Outside every plan worktree, so the per-turn orphan reaper never
+# touches it. Echoes the sha under test. Needs qa_stack_paths first.
+qa_stack_up() {
+    local main_ws=$1
     [[ -n "$RALPH_QA_ENV_FILE" ]] && export QA_ENV_FILE="$RALPH_QA_ENV_FILE"
 
     git -C "$main_ws" fetch origin "$RALPH_GH_MAIN_BRANCH" >/dev/null 2>&1 || true
@@ -664,6 +670,7 @@ qa_main() {
     log_status "INFO" "QA: plans in order: $(cut -f1 <<< "$plans" | sed 's/^/#/' | tr '\n' ' ')"
 
     local sha
+    qa_stack_paths "$main_ws"
     sha=$(qa_stack_up "$main_ws") || return 1
     log_status "INFO" "QA: stack is up on ${sha:0:10}"
 
