@@ -213,6 +213,62 @@ RALPH_QA_EVIDENCE_MAX_MB=1 qa_publish_evidence "$WS" "$EV" "1505/run3" >/dev/nul
 assert_eq "oversized evidence is skipped" "0" \
     "$(git -C "$REMOTE" ls-tree -r --name-only qa-evidence | grep -c 'run3/.*huge.webm')"
 
+echo "=== qa_redact.py ==="
+redact() { python3 "$SCRIPT_DIR/lib/qa_redact.py" --stdin; }
+FAKE_JWT="eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJxYS11c2VyIn0.ZmFrZS1zaWduYXR1cmUtZm9yLXRlc3Rz"
+assert_eq "a JWT anywhere is replaced whole" "token is <redacted:jwt> here" "$(redact <<< "token is $FAKE_JWT here")"
+assert_eq "a Set-Cookie keeps its name and flags" "Set-Cookie: access_token=<redacted>; Path=/; HttpOnly; Secure" \
+    "$(redact <<< "Set-Cookie: access_token=abcdef123456; Path=/; HttpOnly; Secure")"
+assert_eq "a Cookie header blanks every pair" "-H 'Cookie: a=<redacted>; XSRF-TOKEN=<redacted>'" \
+    "$(redact <<< "-H 'Cookie: a=one; XSRF-TOKEN=abcdef123456'")"
+assert_eq "an Authorization header keeps its scheme" "Authorization: Bearer <redacted>" \
+    "$(redact <<< "Authorization: Bearer hp_0123456789abcdef0123456789abcdef")"
+assert_eq "the CSRF header is redacted" "x-csrf-token: <redacted>" "$(redact <<< "x-csrf-token: 9f8e7d6c5b4a")"
+assert_eq "a JSON headers object is redacted" '{"set-cookie": "sid=<redacted>; HttpOnly","content-type": "text/html"}' \
+    "$(redact <<< '{"set-cookie": "sid=s3cr3tvalue; HttpOnly","content-type": "text/html"}')"
+assert_eq "a trace's name/value header is redacted" '{"name":"Cookie","value":"sid=<redacted>"}' \
+    "$(redact <<< '{"name":"Cookie","value":"sid=s3cr3tvalue"}')"
+assert_eq "secret-named JSON fields are redacted" '{"rawKey":"<redacted>","tokenExpiresAt":"2026-10-19T00:00:00Z"}' \
+    "$(redact <<< '{"rawKey":"abcdef0123456789","tokenExpiresAt":"2026-10-19T00:00:00Z"}')"
+assert_eq "a one-time link loses its token, nested ones too" "/verify?token=<redacted>&next=%2Faccept%3Ftoken%3D<redacted>" \
+    "$(redact <<< "/verify?token=abcdef0123456789&next=%2Faccept%3Ftoken%3Dfedcba9876543210")"
+assert_eq "a curl -u credential is redacted, a shell expansion too" 'curl -s -u "<redacted>" https://api.stripe.com' \
+    "$(redact <<< 'curl -s -u "$STRIPE_SECRET_KEY:" https://api.stripe.com')"
+assert_eq "a cookie jar line loses its value" $'localhost\tFALSE\t/\tFALSE\t0\tsid\t<redacted>' \
+    "$(redact <<< $'localhost\tFALSE\t/\tFALSE\t0\tsid\ts3cr3tvalue')"
+assert_eq "URL-encoded JSON loses its token" "?p=%7B%22token%22%3A%22<redacted>%22%7D" \
+    "$(redact <<< "?p=%7B%22token%22%3A%22abcdef0123456789%22%7D")"
+assert_eq "a Stripe publishable key is replaced" '"key":"<redacted:stripe-publishable-key>"' \
+    "$(redact <<< '"key":"pk_test_0000fake0000fake"')"
+assert_eq "a report stays valid JSON" "ok" \
+    "$(redact <<< "{\"QA-01.01\":{\"summary\":\"Cookie: sid=abcdefgh1234 and $FAKE_JWT\"}}" | jq -r 'if .["QA-01.01"].summary then "ok" else "broken" end')"
+mkdir -p "$TMP/zipsrc"
+printf '{"name":"cookie","value":"sid=s3cr3tvalue"}\n' > "$TMP/zipsrc/trace.network"
+(cd "$TMP/zipsrc" && python3 -c 'import zipfile; z=zipfile.ZipFile("../trace.zip","w"); z.write("trace.network"); z.close()')
+mkdir -p "$TMP/zipdir" && mv "$TMP/trace.zip" "$TMP/zipdir/"
+python3 "$SCRIPT_DIR/lib/qa_redact.py" "$TMP/zipdir" 2>/dev/null
+assert_eq "a trace zip's network log is redacted" '{"name":"cookie","value":"sid=<redacted>"}' \
+    "$(python3 -c 'import sys, zipfile; print(zipfile.ZipFile(sys.argv[1]).read("trace.network").decode().strip())' "$TMP/zipdir/trace.zip")"
+printf 'not a zip' > "$TMP/zipdir/broken.zip"
+python3 "$SCRIPT_DIR/lib/qa_redact.py" "$TMP/zipdir" 2>/dev/null
+assert_eq "an unreadable zip is dropped, not published unread" "no" "$([[ -e "$TMP/zipdir/broken.zip" ]] && echo yes || echo no)"
+
+echo "=== qa_publish_evidence redacts ==="
+mkdir -p "$EV/QA-05.04"
+printf 'Set-Cookie: access_token=%s; HttpOnly\n' "$FAKE_JWT" > "$EV/QA-05.04/http-login.txt"
+C4=$(qa_publish_evidence "$WS" "$EV" "1505/run4" 2>/dev/null)
+assert_eq "published evidence carries no session token" "Set-Cookie: access_token=<redacted>; HttpOnly" \
+    "$(git -C "$REMOTE" show "$C4:1505/run4/QA-05.04/http-login.txt")"
+assert_contains "the local evidence is left as captured" "$FAKE_JWT" "$(cat "$EV/QA-05.04/http-login.txt")"
+C5=$(QA_REDACT=/nonexistent/qa_redact.py qa_publish_evidence "$WS" "$EV" "1505/run5" 2>/dev/null)
+assert_eq "no redactor, no publish" "" "$C5"
+
+echo "=== qa_stack_paths exports QA_ENV_FILE to the caller ==="
+unset QA_ENV_FILE
+RALPH_QA_ENV_FILE=/tmp/qa.env qa_stack_paths "$TMP/mainws"
+assert_eq "the plan shell sees QA_ENV_FILE" "/tmp/qa.env" "${QA_ENV_FILE:-}"
+unset QA_ENV_FILE
+
 echo "qa_file_bugs"
 LOG_DIR=$(mktemp -d)
 GH_CREATES=0

@@ -36,6 +36,9 @@ RALPH_QA_SYSTEM_PROMPT_FILE="${RALPH_QA_SYSTEM_PROMPT_FILE:-.ralph/QA_PROMPT.md}
 RALPH_QA_SMOKE_PLAN_ID="${RALPH_QA_SMOKE_PLAN_ID:-QA-00}"        # A non-green smoke plan stops the run
 RALPH_QA_EXTRA_DENY_RULES="${RALPH_QA_EXTRA_DENY_RULES:-Bash(gh issue create*),Bash(gh issue comment*),Bash(gh pr *),Bash(git commit*),Bash(git push*),Bash(stripe * --live*)}"
 
+# The redactor sits next to this file in the source tree and in ~/.ralph-gh/lib.
+QA_REDACT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/qa_redact.py"
+
 QA_SCENARIO_RE='^[[:space:]]*- \[[ xX]\] \*\*(QA-[A-Z]?[0-9]+[a-z]?\.[0-9]+)\*\*[[:space:]]*(.*)$'
 
 QA_SCHEMA='{"type":"object","properties":{"status":{"type":"string","enum":["COMPLETE","IN_PROGRESS","BLOCKED"]},"environment_issue":{"type":"string"},"recommendation":{"type":"string"},"scenarios":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"result":{"type":"string","enum":["PASS","FAIL","BLOCKED"]},"summary":{"type":"string"},"evidence":{"type":"array","items":{"type":"string"}},"blocked_by":{"type":"string"},"bug":{"type":"object","properties":{"title":{"type":"string"},"severity":{"type":"string","enum":["blocker","major","minor"]},"expected":{"type":"string"},"actual":{"type":"string"},"repro":{"type":"string"},"duplicate_of":{"type":"integer"}},"required":["title","severity","expected","actual","repro"]}},"required":["id","result","summary","evidence"]}}},"required":["status","scenarios","recommendation"]}'
@@ -332,13 +335,16 @@ RULES
 # SIDE EFFECTS
 # =============================================================================
 
-# The stack checkout's paths. Must run in the caller's shell, not inside
-# $(qa_stack_up), or the reset and the agent prompt never see them.
+# The stack checkout's paths and QA_ENV_FILE. Must run in the caller's shell,
+# not inside $(qa_stack_up), or the reset, the agent turns and the prompt never
+# see them.
 qa_stack_paths() {
     local main_ws=$1
     QA_STACK_DIR="$main_ws/.ralph-workers/qa-stack"
     QA_STACK_CMD_ABS="$QA_STACK_DIR/$RALPH_QA_STACK_CMD"
     export QA_STACK_DIR QA_STACK_CMD="$QA_STACK_CMD_ABS"
+    [[ -n "$RALPH_QA_ENV_FILE" ]] && export QA_ENV_FILE="$RALPH_QA_ENV_FILE"
+    return 0
 }
 
 # Ensure the long-lived stack checkout exists at the tip of main and the stack
@@ -346,7 +352,6 @@ qa_stack_paths() {
 # touches it. Echoes the sha under test. Needs qa_stack_paths first.
 qa_stack_up() {
     local main_ws=$1
-    [[ -n "$RALPH_QA_ENV_FILE" ]] && export QA_ENV_FILE="$RALPH_QA_ENV_FILE"
 
     git -C "$main_ws" fetch origin "$RALPH_GH_MAIN_BRANCH" >/dev/null 2>&1 || true
     if [[ ! -d "$QA_STACK_DIR" ]]; then
@@ -398,6 +403,14 @@ qa_publish_evidence() {
     (cd "$src" && find . -type f -size +"$((max_bytes - 1))"c) | while IFS= read -r big; do
         log_status "WARN" "QA: evidence ${big#./} exceeds ${RALPH_QA_EVIDENCE_MAX_MB} MB, not published" >&2
     done
+    # Session cookies, CSRF tokens, JWTs and API keys come out before anything
+    # is committed: the branch is pushed, and a history secret scan reads it.
+    # No redactor, no publish.
+    if ! python3 "$QA_REDACT" "$staging/$base" >&2; then
+        log_status "ERROR" "QA: evidence redaction failed; nothing was published" >&2
+        rm -rf "$staging" "$idx"
+        return 1
+    fi
 
     local git_dir tracking="refs/remotes/origin/$branch"
     git_dir=$(git -C "$main_ws" rev-parse --absolute-git-dir) || return 1
@@ -574,7 +587,14 @@ qa_run_plan() {
         note="Incomplete after $RALPH_QA_MAX_LOOPS turns: scenarios without a valid result are shown as NOT RUN."
     fi
 
-    # Publish evidence, file bugs, then post the proof.
+    # Publish evidence, file bugs, then post the proof. The model's summaries
+    # and bug text go into issues, so they pass the same redactor as the files.
+    local redacted_results
+    if redacted_results=$(python3 "$QA_REDACT" --stdin <<< "$results") && jq -e . >/dev/null 2>&1 <<< "$redacted_results"; then
+        results=$redacted_results
+    else
+        log_status "WARN" "QA: redacting the report failed; summaries and bugs are filed as written"
+    fi
     local base="$plan/$run_id" commit=""
     commit=$(qa_publish_evidence "$main_ws" "$evidence_dir" "$base") || {
         log_status "WARN" "QA: evidence push to $RALPH_QA_EVIDENCE_BRANCH failed; the proof lists paths only"

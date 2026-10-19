@@ -234,7 +234,7 @@ Per run:
 2. For each plan, it runs `$RALPH_QA_STACK_CMD reset --seed $RALPH_QA_SEED`, then gives the model the plan, with `.ralph/QA_PROMPT.md` as its system prompt and a structured schema. The model may not file issues, comment, commit or push.
 3. The gate is **every scenario executed with evidence**: PASS/FAIL need an evidence file that exists under `$QA_EVIDENCE_DIR`, FAIL needs a complete bug, BLOCKED needs `blocked_by`. The gate does not require scenarios to pass, so a failing product never loops the model.
 4. The shell then:
-   - pushes the evidence to the orphan `qa-evidence` branch;
+   - redacts the evidence (`lib/qa_redact.py`: session cookies, CSRF and form-session headers, `Authorization`, JWTs, API and Stripe keys, token-named fields and query parameters, `curl -u` credentials, inside trace zips too; an unreadable zip is dropped) and pushes it to the orphan `qa-evidence` branch. No `python3`, no publish. The model's summaries and bug text pass the same redactor before they reach an issue;
    - files one bug per new FAIL (`bug`, `qa-found`, `sev:<blocker|major|minor>`), or comments on the open bug the model named as a duplicate;
    - posts a proof comment (verdict table plus inline screenshots);
    - ticks the PASS scenario boxes and rewrites the plan's `## Blocked by` list.
@@ -247,7 +247,7 @@ A smoke plan (`RALPH_QA_SMOKE_PLAN_ID`, default `QA-00`) that is not green stops
 | `RALPH_QA_LABEL` | `qa` | Second label that marks a plan |
 | `RALPH_QA_SKIP_LABELS` | `hitl` | Plans carrying any of these never run |
 | `RALPH_QA_STACK_CMD` | `scripts/qa-stack.sh` | Must support `up` and `reset --seed <name>` |
-| `RALPH_QA_ENV_FILE` | — | Secrets for the stack (e.g. a Stripe test key), exported as `QA_ENV_FILE` |
+| `RALPH_QA_ENV_FILE` | — | Secrets for the stack (e.g. a Stripe test key), exported as `QA_ENV_FILE` to the stack and every QA turn |
 | `RALPH_QA_MAX_LOOPS` | `4` | Turns per plan before unfinished scenarios are reported NOT RUN |
 | `RALPH_QA_TIMEOUT_MINUTES` | `CLAUDE_TIMEOUT_MINUTES` | Per-turn wall clock |
 | `RALPH_QA_EVIDENCE_BRANCH` | `qa-evidence` | Orphan branch for screenshots and traces |

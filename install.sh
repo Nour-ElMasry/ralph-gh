@@ -69,7 +69,7 @@ mkdir -p "$INSTALL_DIR/prompts"
 
 # Copy scripts
 cp "$SCRIPT_DIR/ralph-gh.sh" "$INSTALL_DIR/"
-cp "$SCRIPT_DIR/lib/"*.sh "$INSTALL_DIR/lib/"
+cp "$SCRIPT_DIR/lib/"*.sh "$SCRIPT_DIR/lib/"*.py "$INSTALL_DIR/lib/"
 cp "$SCRIPT_DIR/prompts/"*.md "$INSTALL_DIR/prompts/" 2>/dev/null || true
 
 # Make executable
