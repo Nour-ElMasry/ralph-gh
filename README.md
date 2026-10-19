@@ -226,7 +226,7 @@ proceeds uncapped with a `WARN`.
 
 ## QA mode
 
-`ralph-gh qa [ISSUE ...]` executes test plans instead of implementing them. A plan is an open issue labelled `ralph` + `qa` whose scenarios look like `- [ ] **QA-05.01** <behaviour>`. With no arguments it runs every such plan in programme order (`QA-00`, `QA-01`, …, `QA-18a`, lettered tracks like `QA-H1` last). A parent issue argument expands to the unchecked plans in its `## Sub-Issues` list. `ralph-gh run` hands `qa` issues over to this mode, and its label poll never picks them up.
+`ralph-gh qa [--scenarios QA-NN.MM,...] [ISSUE ...]` executes test plans instead of implementing them. A plan is an open issue labelled `ralph` + `qa` whose scenarios look like `- [ ] **QA-05.01** <behaviour>`. With no arguments it runs every such plan in programme order (`QA-00`, `QA-01`, …, `QA-18a`, lettered tracks like `QA-H1` last). A parent issue argument expands to the unchecked plans in its `## Sub-Issues` list. `ralph-gh run` hands `qa` issues over to this mode, and its label poll never picks them up.
 
 Per run:
 
@@ -240,6 +240,10 @@ Per run:
    - ticks the PASS scenario boxes and rewrites the plan's `## Blocked by` list.
 5. An all-green plan is closed and checked off on its `Parent QA #N`. Otherwise it stays open without the `ralph` label until a human re-adds it, and the whole plan reruns.
 
+**Targeted re-tests.** `ralph-gh qa --scenarios QA-07.24,QA-05.15 [ISSUE ...]` (or `RALPH_QA_SCENARIOS`) runs only those scenarios. Plans holding none of them are skipped; labels and the open-state rules are unchanged. The model is told to set up any prerequisite state itself from the fresh seed. Gate, tally, proof ("Targeted re-test: N of M scenarios") and bug filing cover the subset only. The body rewrite touches only the subset's boxes and merges its bugs into the existing `## Blocked by` list. The plan closes when this run is clean **and** every scenario box in the body is ticked. Each filed bug ends with the exact re-test command for its scenario.
+
+**Token economy.** The QA rules tell the model to keep bulky output (curl bodies, psql, logs, Mailpit, Playwright) in files and read back only the lines it needs. They also tell it to delegate scenarios, one at a time in the foreground, to subagents: mechanical assertions go to `RALPH_QA_SCENARIO_MODEL`, and judgment calls (design, copy, exploratory security) go to `RALPH_QA_JUDGE_MODEL`. A cheap-model FAIL is reproduced on the judge model before it is reported.
+
 A smoke plan (`RALPH_QA_SMOKE_PLAN_ID`, default `QA-00`) that is not green stops the run. So does a broken stack.
 
 | Variable | Default | |
@@ -252,6 +256,9 @@ A smoke plan (`RALPH_QA_SMOKE_PLAN_ID`, default `QA-00`) that is not green stops
 | `RALPH_QA_TIMEOUT_MINUTES` | `CLAUDE_TIMEOUT_MINUTES` | Per-turn wall clock |
 | `RALPH_QA_EVIDENCE_BRANCH` | `qa-evidence` | Orphan branch for screenshots and traces |
 | `RALPH_QA_EVIDENCE_MAX_MB` | `25` | Larger files are not published |
+| `RALPH_QA_SCENARIOS` | — | Comma-separated scenario ids for a targeted re-test (`--scenarios` sets it) |
+| `RALPH_QA_SCENARIO_MODEL` | `sonnet` | Subagent model for mechanical scenarios |
+| `RALPH_QA_JUDGE_MODEL` | `opus` | Subagent model for judgment scenarios and FAIL reproduction |
 | `RALPH_QA_ALLOWED_TOOLS` | curl, jq, node, pnpm, npx, gh issue list/view, stripe, k6, the stack command | Pre-approved tools for QA turns |
 
 ## Safety

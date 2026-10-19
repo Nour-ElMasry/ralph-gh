@@ -139,6 +139,33 @@ assert_not_contains "empty list removes the section" "## Blocked by" "$GREEN"
 assert_contains "content after the section survives" "## Out of scope" \
     "$(qa_rewrite_body $'## Blocked by\n\n- #1\n\n## Out of scope\n- x' '{}' '')"
 
+echo "=== qa_select_scenarios ==="
+assert_eq "empty selection keeps every scenario" "$SCEN" "$(qa_select_scenarios "$SCEN" "")"
+assert_eq "selection keeps listed ids in body order" $'QA-05.01\nQA-05.03' \
+    "$(qa_select_scenarios "$SCEN" "QA-05.03, QA-05.01" | cut -f1)"
+assert_eq "ids outside the plan select nothing" "" "$(qa_select_scenarios "$SCEN" "QA-07.24")"
+
+echo "=== qa_rewrite_body (targeted subset) ==="
+SUBSET=$(qa_select_scenarios "$SCEN" "QA-05.03")
+TICKED_BODY=$(sed 's/- \[ \] \*\*QA-05.01/- [x] **QA-05.01/' <<< "$PLAN_BODY")
+SUB_RES='{"QA-05.03":{"result":"PASS"}}'
+SUB=$(qa_rewrite_body "$TICKED_BODY" "$SUB_RES" "" "$SUBSET")
+assert_contains "subset PASS ticks its box" "- [x] **QA-05.03**" "$SUB"
+assert_contains "scenarios outside the subset keep their ticks" "- [x] **QA-05.02**" "$SUB"
+UNTICKED=$(qa_rewrite_body "$PLAN_BODY" "$SUB_RES" "" "$SUBSET")
+assert_contains "unticked scenarios outside the subset stay unticked" "- [ ] **QA-05.01**" "$UNTICKED"
+PRIOR=$(qa_rewrite_body "$PLAN_BODY" '{}' $'- #9001 (QA-05.01)\n- #9003 (QA-05.03)')
+MERGED=$(qa_rewrite_body "$PRIOR" '{"QA-05.03":{"result":"FAIL"}}' "- #9004 (QA-05.03)" "$SUBSET")
+assert_eq "Blocked by keeps other scenarios' bugs and merges this run's" $'- #9001 (QA-05.01)\n- #9004 (QA-05.03)' \
+    "$(sed -n '/^## Blocked by/,$p' <<< "$MERGED" | grep '^- #')"
+CLEARED=$(qa_rewrite_body "$PRIOR" "$SUB_RES" "" "$SUBSET")
+assert_eq "a subset pass drops only its own bug" "- #9001 (QA-05.01)" "$(sed -n '/^## Blocked by/,$p' <<< "$CLEARED" | grep '^- #')"
+
+echo "=== qa_all_ticked ==="
+qa_all_ticked "$SUB"; assert_eq "every scenario ticked" "0" "$?"
+qa_all_ticked "$UNTICKED"; assert_eq "one unticked scenario" "1" "$?"
+qa_all_ticked "no scenarios here"; assert_eq "a body without scenarios is not all ticked" "1" "$?"
+
 echo "=== rendering ==="
 assert_eq "image URL renders raw" "https://github.com/o/r/blob/abc/1/2/QA-05.01/final.png?raw=true" \
     "$(qa_evidence_url o/r abc 1/2/QA-05.01/final.png)"
@@ -157,6 +184,7 @@ assert_eq "proof stays under GitHub's comment limit" "1" \
 BUG=$(qa_render_bug o/r 1505 QA-05.03 "Upload over 10 MB is refused" r1 deadbeefcafe "$(jq -c '."QA-05.03"' <<< "$GOOD")" abc base)
 assert_contains "bug names its plan and scenario" "Found by #1505 · **QA-05.03**" "$BUG"
 assert_contains "bug carries severity" "**Severity:** major" "$BUG"
+assert_contains "bug re-test is targeted" "run \`ralph-gh qa --scenarios QA-05.03 1505\`" "$BUG"
 
 echo "=== qa_labels_hit ==="
 qa_labels_hit '["ralph","qa"]' "qa"; assert_eq "label present" "0" "$?"

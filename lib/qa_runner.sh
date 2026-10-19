@@ -34,6 +34,9 @@ RALPH_QA_MAX_LOOPS="${RALPH_QA_MAX_LOOPS:-4}"
 RALPH_QA_TIMEOUT_MINUTES="${RALPH_QA_TIMEOUT_MINUTES:-}"         # Empty → CLAUDE_TIMEOUT_MINUTES
 RALPH_QA_SYSTEM_PROMPT_FILE="${RALPH_QA_SYSTEM_PROMPT_FILE:-.ralph/QA_PROMPT.md}"
 RALPH_QA_SMOKE_PLAN_ID="${RALPH_QA_SMOKE_PLAN_ID:-QA-00}"        # A non-green smoke plan stops the run
+RALPH_QA_SCENARIOS="${RALPH_QA_SCENARIOS:-}"                     # Comma-separated scenario ids for a targeted re-test; empty → every scenario
+RALPH_QA_SCENARIO_MODEL="${RALPH_QA_SCENARIO_MODEL:-sonnet}"    # Subagent model for mechanical scenarios (HTTP/DB/mail/log assertions)
+RALPH_QA_JUDGE_MODEL="${RALPH_QA_JUDGE_MODEL:-opus}"            # Subagent model for judgment scenarios and FAIL reproduction
 RALPH_QA_EXTRA_DENY_RULES="${RALPH_QA_EXTRA_DENY_RULES:-Bash(gh issue create*),Bash(gh issue comment*),Bash(gh pr *),Bash(git commit*),Bash(git push*),Bash(stripe * --live*)}"
 
 # The redactor sits next to this file in the source tree and in ~/.ralph-gh/lib.
@@ -56,6 +59,43 @@ qa_parse_scenarios() {
             printf '%s\t%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
         fi
     done <<< "$body"
+}
+
+# The scenarios a run executes: the lines of a qa_parse_scenarios TSV whose id
+# is in a comma-separated list. An empty list selects every scenario.
+#   $1 = scenarios TSV, $2 = comma-separated ids
+qa_select_scenarios() {
+    local scenarios=$1 csv=$2 id title
+    if [[ -z "${csv//[[:space:],]/}" ]]; then
+        printf '%s' "$scenarios"
+        [[ -n "$scenarios" ]] && printf '\n'
+        return 0
+    fi
+    local -A wanted=()
+    local IFS=','
+    for id in $csv; do
+        id=${id//[[:space:]]/}
+        [[ -n "$id" ]] && wanted[$id]=1
+    done
+    IFS=$'\t'
+    while read -r id title; do
+        [[ -n "$id" && -n "${wanted[$id]:-}" ]] && printf '%s\t%s\n' "$id" "$title"
+    done <<< "$scenarios"
+    return 0
+}
+
+# True when a body has scenario lines and every one of them is ticked. A
+# targeted re-test closes its plan only through this: the scenarios it did not
+# run must already have passed in an earlier run.
+qa_all_ticked() {
+    local body=$1 line seen=0
+    while IFS= read -r line; do
+        line=${line%$'\r'}
+        [[ "$line" =~ $QA_SCENARIO_RE ]] || continue
+        seen=1
+        [[ "$line" =~ ^[[:space:]]*-\ \[[xX]\] ]] || return 1
+    done <<< "$body"
+    [[ $seen -eq 1 ]]
 }
 
 # "QA-05" from a title like "QA-05: Public runtime" (empty when absent).
@@ -160,31 +200,53 @@ qa_tally() {
 # Tick each scenario box from this run (PASS → [x], everything else → [ ]),
 # and replace the "## Blocked by" section with the open bug list (removed when
 # the list is empty). Every other line is left byte-for-byte.
-#   $1 = body, $2 = results JSON, $3 = blocked-by markdown bullets (may be empty)
+#
+# A targeted re-test passes the scenarios it ran as $4: only those boxes are
+# rewritten, and Blocked-by bullets ("- #N (QA-xx.yy)") for other scenarios
+# are kept and merged with this run's list.
+#   $1 = body, $2 = results JSON, $3 = blocked-by markdown bullets (may be empty),
+#   $4 = scenarios TSV this run executed (empty → every scenario in the body)
 qa_rewrite_body() {
-    local body=$1 results=$2 blocked_md=$3
-    local out="" line id result in_blocked=0
+    local body=$1 results=$2 blocked_md=$3 run_scenarios=${4:-}
+    local out="" line id result in_blocked=0 kept="" title
+    local -A in_run=()
+    while IFS=$'\t' read -r id title; do
+        [[ -n "$id" ]] && in_run[$id]=1
+    done <<< "$run_scenarios"
     while IFS= read -r line; do
         if [[ "$line" == "## Blocked by"* ]]; then
             in_blocked=1
             continue
         fi
         if [[ $in_blocked -eq 1 ]]; then
-            [[ "$line" == "## "* ]] || continue
+            if [[ "$line" != "## "* ]]; then
+                if [[ -n "$run_scenarios" && "$line" == "- "* ]]; then
+                    if [[ "$line" =~ \((QA-[A-Z]?[0-9]+[a-z]?\.[0-9]+)\) ]] && [[ -n "${in_run[${BASH_REMATCH[1]}]:-}" ]]; then
+                        continue
+                    fi
+                    kept+="$line"$'\n'
+                fi
+                continue
+            fi
             in_blocked=0
         fi
         if [[ "$line" =~ $QA_SCENARIO_RE ]]; then
             id=${BASH_REMATCH[1]}
-            result=$(jq -r --arg id "$id" '.[$id].result // ""' <<< "$results")
-            if [[ "$result" == "PASS" ]]; then
-                line=$(printf '%s' "$line" | sed -E 's/- \[[ xX]\]/- [x]/')
-            else
-                line=$(printf '%s' "$line" | sed -E 's/- \[[ xX]\]/- [ ]/')
+            if [[ -z "$run_scenarios" || -n "${in_run[$id]:-}" ]]; then
+                result=$(jq -r --arg id "$id" '.[$id].result // ""' <<< "$results")
+                if [[ "$result" == "PASS" ]]; then
+                    line=$(printf '%s' "$line" | sed -E 's/- \[[ xX]\]/- [x]/')
+                else
+                    line=$(printf '%s' "$line" | sed -E 's/- \[[ xX]\]/- [ ]/')
+                fi
             fi
         fi
         out+="$line"$'\n'
     done <<< "$body"
     out=${out%$'\n'}
+    if [[ -n "$kept" ]]; then
+        blocked_md=$(printf '%s%s' "$kept" "$blocked_md" | sed '/^$/d' | sort -u)
+    fi
     if [[ -n "$blocked_md" ]]; then
         out=${out%$'\n'}
         out+=$'\n\n## Blocked by\n\n'"$blocked_md"
@@ -285,7 +347,7 @@ qa_render_bug() {
     out+=$'### Actual\n\n'"$(jq -r '.bug.actual' <<< "$r")"$'\n\n'
     out+=$'### Repro\n\n'"$(jq -r '.bug.repro' <<< "$r")"$'\n\n'
     out+=$'### Evidence\n\n'"$(qa_render_evidence "$repo" "$commit" "$base" "$r")"$'\n\n'
-    out+="Re-test: re-add the \`${RALPH_GH_LABEL:-ralph}\` label to #$plan once this is fixed; the whole plan re-runs."
+    out+="Re-test: once this is fixed, re-add the \`${RALPH_GH_LABEL:-ralph}\` label to #$plan and run \`ralph-gh qa --scenarios $id $plan\`."
     printf '%s' "$out"
 }
 
@@ -302,13 +364,21 @@ qa_labels_hit() {
 # PROMPT
 # =============================================================================
 
+# $6 = scenarios TSV of a targeted re-test (empty → the whole plan), $7 = the
+# plan's total scenario count.
 qa_build_prompt() {
-    local plan=$1 title=$2 body=$3 evidence_dir=$4 retry_context=${5:-}
+    local plan=$1 title=$2 body=$3 evidence_dir=$4 retry_context=${5:-} targeted=${6:-} total=${7:-}
     local prompt=""
     if [[ -n "$retry_context" ]]; then
         prompt+=$'## PRIOR TURN INCOMPLETE — RESOLVE THIS FIRST\n\n'"$retry_context"$'\n\n'
     fi
     prompt+="## QA plan: #${plan} - ${title}"$'\n\n'"$body"$'\n\n'
+    if [[ -n "$targeted" ]]; then
+        prompt+="## Targeted re-test: $(wc -l <<< "$targeted") of $total scenarios"$'\n\n'
+        prompt+="This run re-tests **exactly** these scenarios, and nothing else in the plan:"$'\n\n'
+        prompt+=$(cut -f1 <<< "$targeted" | sed 's/^/- /')$'\n\n'
+        prompt+="Every other scenario is out of scope: do not execute it and do not report it. Where \"every scenario\" appears in the rules below, read it as every scenario in this list. The stack was reset to the fresh seed, so set up any prerequisite state yourself, including steps an earlier scenario of this plan would normally have done (sign-ups, published forms, submissions, settings). Setup is not a result: report only the listed ids."$'\n\n'
+    fi
     prompt+=$(cat <<RULES
 ## Rules (QA mode)
 
@@ -322,6 +392,13 @@ You are executing a QA test plan, not implementing anything.
 6. **Do not file issues, comment, commit or push.** The shell publishes your evidence and files your bugs from the structured report.
 7. If the **stack itself** is broken (a service won't come up, or the seed failed) and \`\$QA_STACK_CMD reset\` does not fix it, stop: return \`status: BLOCKED\` with \`environment_issue\` describing it. That is the harness failing, not the product.
 8. Long plans may take several turns. Every turn, report **all** scenarios you have results for so far (results are merged by id). Return \`status: COMPLETE\` once every scenario has a result.
+9. **Never print bulky output into the conversation.** Redirect curl bodies and headers, psql results, service logs, Mailpit messages and Playwright output into evidence or \`.qa/scripts/\` scratch files, then read back only the lines you need (\`grep\`, \`jq\`, \`head\`). Never \`cat\` a whole evidence file, log or HTML page.
+10. **Delegate scenarios to subagents with the Agent tool**: one scenario, or one group of consecutive scenarios that share state, per subagent. Run them in the **foreground, one at a time, never in parallel**: there is one shared stack and a reset wipes it. Never end your turn while a subagent runs.
+    - **Mechanical** scenarios (HTTP, DB, mail, webhook or log assertions with explicit Expect lines) go to model \`$RALPH_QA_SCENARIO_MODEL\`.
+    - **Judgment** scenarios go to model \`$RALPH_QA_JUDGE_MODEL\`: design review against DESIGN.md, visual or layout checks, copy and UX, exploratory or adversarial security, and anything ambiguous.
+    - Each subagent prompt says to read \`$RALPH_QA_SYSTEM_PROMPT_FILE\` first; gives the scenario text verbatim, \`\$QA_EVIDENCE_DIR\` (\`$evidence_dir\`), \`\$QA_STACK_CMD\` and the environment facts it needs; restates hard rules 1–6 of the system prompt briefly; and asks it to write its evidence files and return **only** a compact JSON verdict: \`id\`, \`result\`, \`summary\`, \`evidence\` paths, \`blocked_by\`, and the full \`bug\` object for a FAIL.
+    - A FAIL from a \`$RALPH_QA_SCENARIO_MODEL\` subagent is reproduced by a subagent on model \`$RALPH_QA_JUDGE_MODEL\` before you report it: every FAIL becomes a GitHub issue.
+    - Spot-check that each returned evidence path exists before you report it. The structured report stays yours to write.
 
 ## Final report (REQUIRED)
 
@@ -499,12 +576,22 @@ qa_run_plan() {
     plan_id=$(qa_plan_id "$title")
     parent=$(qa_parent_number "$body")
 
-    local scenarios
-    scenarios=$(qa_parse_scenarios "$body")
-    if [[ -z "$scenarios" ]]; then
+    local all_scenarios scenarios targeted="" total
+    all_scenarios=$(qa_parse_scenarios "$body")
+    if [[ -z "$all_scenarios" ]]; then
         comment_on_issue "$repo" "$plan" "ralph-gh QA mode found no scenarios (\`- [ ] **QA-NN.MM** …\`) in this plan, so nothing ran." || true
         return 1
     fi
+    total=$(wc -l <<< "$all_scenarios")
+    # A targeted re-test runs, gates, tallies, proves and files bugs on the
+    # selected subset only; the rest of the plan keeps its earlier verdicts.
+    scenarios=$(qa_select_scenarios "$all_scenarios" "$RALPH_QA_SCENARIOS")
+    scenarios=${scenarios%$'\n'}
+    if [[ -z "$scenarios" ]]; then
+        log_status "INFO" "QA: #$plan has none of the scenarios $RALPH_QA_SCENARIOS, skipped"
+        return 1
+    fi
+    [[ -n "$RALPH_QA_SCENARIOS" ]] && targeted=$scenarios
 
     local run_id worktree state_dir evidence_dir results_file
     run_id=$(date '+%Y%m%d-%H%M%S')
@@ -519,7 +606,11 @@ qa_run_plan() {
     mkdir -p "$evidence_dir" "$worktree/.qa/scripts"
     export QA_EVIDENCE_DIR="$evidence_dir" QA_PLAN_ISSUE="$plan" QA_RUN_ID="$run_id"
 
-    log_status "LOOP" "=== QA plan #$plan $plan_id ($(wc -l <<< "$scenarios") scenarios) ==="
+    if [[ -n "$targeted" ]]; then
+        log_status "LOOP" "=== QA plan #$plan $plan_id (targeted re-test: $(wc -l <<< "$scenarios") of $total scenarios) ==="
+    else
+        log_status "LOOP" "=== QA plan #$plan $plan_id ($total scenarios) ==="
+    fi
     if ! qa_stack_reset; then
         log_status "ERROR" "QA: stack reset failed before #$plan — see $LOG_DIR/qa-stack.log"
         git -C "$main_ws" worktree remove --force "$worktree" >/dev/null 2>&1
@@ -544,7 +635,7 @@ qa_run_plan() {
         export RALPH_TELEMETRY_LOOP="$loop"
         log_status "INFO" "QA plan #$plan — turn $loop/$RALPH_QA_MAX_LOOPS"
         local out="$state_dir/turn-$loop.json" err="$state_dir/turn-$loop.err" rc=0
-        run_claude "$worktree" "$(qa_build_prompt "$plan" "$title" "$body" "$evidence_dir" "$retry_context")" \
+        run_claude "$worktree" "$(qa_build_prompt "$plan" "$title" "$body" "$evidence_dir" "$retry_context" "$targeted" "$total")" \
             "$out" "$err" "$((timeout_minutes * 60))" "$RALPH_GH_MODEL" "$QA_SCHEMA" \
             "$session_id" "$allowed" "" "qa" 7>&- || rc=$?
         session_id=$RALPH_LAST_SESSION_ID
@@ -586,6 +677,9 @@ qa_run_plan() {
     if [[ $gate_ok -ne 0 ]]; then
         note="Incomplete after $RALPH_QA_MAX_LOOPS turns: scenarios without a valid result are shown as NOT RUN."
     fi
+    if [[ -n "$targeted" ]]; then
+        note="Targeted re-test: $(wc -l <<< "$scenarios") of $total scenarios.${note:+ $note}"
+    fi
 
     # Publish evidence, file bugs, then post the proof. The model's summaries
     # and bug text go into issues, so they pass the same redactor as the files.
@@ -614,7 +708,7 @@ qa_run_plan() {
     local blocked_md
     blocked_md=$(jq -r 'to_entries | map("- #\(.value) (\(.key))") | unique | .[]' <<< "$bugs")
     local new_body
-    new_body=$(qa_rewrite_body "$body" "$results" "$blocked_md")
+    new_body=$(qa_rewrite_body "$body" "$results" "$blocked_md" "$targeted")
     [[ "$new_body" != "$body" ]] && { gh issue edit "$plan" --repo "$repo" --body "$new_body" < /dev/null >/dev/null 2>&1 || true; }
 
     local summary="$plan_id #$plan run \`$run_id\`: $pass PASS · $fail FAIL · $blocked BLOCKED"
@@ -623,8 +717,10 @@ qa_run_plan() {
 
     remove_label "$repo" "$plan" "$RALPH_GH_LABEL" || true
     local status=1
-    if [[ $fail -eq 0 && $blocked -eq 0 && $not_run -eq 0 ]]; then
-        close_sub_issue "$repo" "$plan" "All $pass scenarios passed in QA run \`$run_id\` on \`${sha:0:10}\`. Closing." || true
+    # A targeted re-test closes the plan only when the scenarios it skipped had
+    # already passed; a full run's body is all-ticked exactly when all passed.
+    if [[ $fail -eq 0 && $blocked -eq 0 && $not_run -eq 0 ]] && qa_all_ticked "$new_body"; then
+        close_sub_issue "$repo" "$plan" "All $total scenarios have passed; the last $pass in QA run \`$run_id\` on \`${sha:0:10}\`. Closing." || true
         [[ -n "$parent" ]] && check_off_sub_issue "$repo" "$parent" "$plan"
         telemetry_record_outcome "qa_pass" "$summary" || true
         status=0
@@ -703,9 +799,15 @@ qa_main() {
     sha=$(qa_stack_up "$main_ws") || return 1
     log_status "INFO" "QA: stack is up on ${sha:0:10}"
 
-    local num title rc failed=0
+    local num title rc failed=0 ran=0
     while IFS=$'\t' read -r num title; do
         [[ -z "$num" ]] && continue
+        if [[ -n "$RALPH_QA_SCENARIOS" ]] \
+           && [[ -z "$(qa_select_scenarios "$(qa_parse_scenarios "$(get_issue_body "$repo" "$num")")" "$RALPH_QA_SCENARIOS")" ]]; then
+            log_status "INFO" "QA: #$num has none of the scenarios $RALPH_QA_SCENARIOS, skipped"
+            continue
+        fi
+        ran=$((ran + 1))
         rc=0
         qa_run_plan "$main_ws" "$repo" "$num" "$sha" || rc=$?
         if [[ $rc -eq 2 ]]; then
@@ -719,6 +821,6 @@ qa_main() {
         fi
     done <<< "$plans"
 
-    log_status "SUCCESS" "QA run complete: $(wc -l <<< "$plans") plan(s), $failed with findings"
+    log_status "SUCCESS" "QA run complete: $ran plan(s), $failed with findings"
     return 0
 }

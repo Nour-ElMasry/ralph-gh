@@ -1159,6 +1159,7 @@ run_command() {
 qa_command() {
     load_config
     cgroup_reexec_in_slice "$SCRIPT_DIR/ralph-gh.sh" "${_RALPH_ARGV[@]}"
+    [[ -n "${_QA_SCENARIOS_OVERRIDE:-}" ]] && RALPH_QA_SCENARIOS="$_QA_SCENARIOS_OVERRIDE"
     validate_environment
     cd "$RALPH_GH_WORKSPACE"
 
@@ -1170,7 +1171,7 @@ qa_command() {
     fi
     trap 'log_status "WARN" "Caught signal, shutting down..."; kill 0 2>/dev/null; exit 130' INT TERM
 
-    log_status "INFO" "QA mode — repo $RALPH_GH_REPO, labels '$RALPH_GH_LABEL' + '$RALPH_QA_LABEL'"
+    log_status "INFO" "QA mode — repo $RALPH_GH_REPO, labels '$RALPH_GH_LABEL' + '$RALPH_QA_LABEL'${RALPH_QA_SCENARIOS:+, targeted re-test of $RALPH_QA_SCENARIOS}"
     qa_main "${_TARGET_ISSUES[@]}" || exit 1
 }
 
@@ -1227,11 +1228,21 @@ case "${1:-}" in
     qa)
         shift
         _TARGET_ISSUES=()
-        for _arg in "$@"; do
-            if [[ "$_arg" =~ ^[0-9]+$ ]]; then
-                _TARGET_ISSUES+=("$_arg")
+        while [[ $# -gt 0 ]]; do
+            if [[ "$1" == "--scenarios" ]]; then
+                if [[ -n "${2:-}" ]]; then
+                    _QA_SCENARIOS_OVERRIDE="$2"
+                    shift 2
+                    continue
+                fi
+                echo "Error: --scenarios requires a value (e.g. QA-07.24,QA-05.15)"
+                exit 1
+            fi
+            if [[ "$1" =~ ^[0-9]+$ ]]; then
+                _TARGET_ISSUES+=("$1")
+                shift
             else
-                echo "Usage: ralph-gh qa [ISSUE_NUMBER ...]"
+                echo "Usage: ralph-gh qa [--scenarios QA-NN.MM,...] [ISSUE_NUMBER ...]"
                 exit 1
             fi
         done
@@ -1325,6 +1336,7 @@ case "${1:-}" in
         echo "  run [--label L] [--skip-label L] [ISSUE ...]    Process issues and exit"
         echo "  qa [ISSUE ...]                                  Execute QA plans (labels ralph + qa): post proof, file bugs"
         echo "                                                  A parent issue expands to its Sub-Issues list"
+        echo "  qa --scenarios QA-07.24,QA-05.15 [ISSUE ...]    Targeted re-test: run only those scenarios"
         echo ""
         echo "  When issue numbers are given, ralph works on those specific issues"
         echo "  (no label required) in isolated git worktrees. Without issue numbers,"
