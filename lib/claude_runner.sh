@@ -16,10 +16,13 @@
 #   --json-schema              structured result instead of regex over prose
 #   --fallback-model / --effort / --max-budget-usd
 #
-# Result JSON (from --output-format json) is a single object with .result,
-# .structured_output, .session_id, .num_turns, .duration_ms, .total_cost_usd,
-# .is_error, .stop_reason, .permission_denials. Older/stream formats emit an
-# array; claude_result_json normalises both.
+# Output is --output-format stream-json, compacted after the run to its result
+# events (one JSON object per line, each with .result, .structured_output,
+# .session_id, .num_turns, .duration_ms, .total_cost_usd, .is_error,
+# .stop_reason, .permission_denials). One invocation can emit several: a
+# background subagent that hands back after the turn ends starts a follow-up
+# turn whose result carries no structured_output, and the json format keeps
+# only that last one. claude_result_json picks the right one from any format.
 
 RALPH_GH_PERMISSION_MODE="${RALPH_GH_PERMISSION_MODE:-auto}"
 RALPH_GH_SETTING_SOURCES="${RALPH_GH_SETTING_SOURCES:-user,project,local}"
@@ -58,7 +61,7 @@ claude_build_args() {
     local sys_mode=${7:-}
     local session_mode=${8:-resume}
 
-    printf '%s\n' "--output-format" "json"
+    printf '%s\n' "--output-format" "stream-json" "--verbose"
     printf '%s\n' "--permission-mode" "$permission_mode"
 
     if [[ -n "$RALPH_GH_SETTING_SOURCES" ]]; then
@@ -166,6 +169,12 @@ run_claude() {
     )
     exit_code=$?
 
+    # Keep only the result events; the full stream of a 90-minute turn runs to
+    # tens of MB. fromjson? skips the torn last line of a killed run.
+    local results_only
+    results_only=$(jq -Rc 'fromjson? | if type == "array" then .[] else . end | select(type == "object" and .type == "result")' "$output_file" 2>/dev/null) || true
+    printf '%s' "$results_only" > "$output_file"
+
     # The CLI is dead (exited or killed) — anything still running in the
     # worktree is an orphan of this invocation and would poison the next loop.
     reap_workspace_orphans "$workspace"
@@ -185,16 +194,14 @@ run_claude() {
     return $exit_code
 }
 
-# Echo the final result object from a claude --output-format json file.
-# Handles both the object form and the array/stream form.
+# Echo the result object a caller should read from a claude output file: the
+# last result that carries structured_output, else the last result. Accepts a
+# single object, an array, or one object per line.
 claude_result_json() {
     local output_file=$1
     [[ -f "$output_file" ]] || { echo '{}'; return 0; }
-    if jq -e 'type == "array"' "$output_file" >/dev/null 2>&1; then
-        jq -c '[.[] | select(.type == "result")] | (.[-1] // {})' "$output_file" 2>/dev/null || echo '{}'
-    else
-        jq -c '.' "$output_file" 2>/dev/null || echo '{}'
-    fi
+    jq -sc '[.[] | if type == "array" then .[] else . end | select(type == "object" and .type == "result")]
+        | ((map(select(.structured_output != null)) | last) // last // {})' "$output_file" 2>/dev/null || echo '{}'
 }
 
 # Echo a jq expression evaluated against the result object (raw output).
