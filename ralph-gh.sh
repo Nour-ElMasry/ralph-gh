@@ -397,7 +397,7 @@ process_parent_group() {
             if ! acceptance_failures=$(run_acceptance_gate 2>&1); then
                 log_status "WARN" "Sub-issue #$sub_number: ACCEPTANCE gate failed"
                 log_status "WARN" "Unmet criteria:"$'\n'"$acceptance_failures"
-                retry_context="ACCEPTANCE GATE FAILED. The following criteria are not yet met — address each one and re-report with them met. Evidence (file:line or test name) is required for each."$'\n\n'"$acceptance_failures"
+                retry_context="ACCEPTANCE GATE FAILED. Address each point below, then re-report. Every criterion you report met needs evidence (file:line or test name)."$'\n\n'"$acceptance_failures"
                 record_result "true" "true"
                 continue
             fi
@@ -407,7 +407,7 @@ process_parent_group() {
             #    model's tests_status, and never a Stop hook it can satisfy by
             #    stopping twice.
             local verify_failures
-            if ! verify_failures=$(run_verify_gate "$RALPH_GH_WORKSPACE" "$sub_start_ref"); then
+            if ! verify_failures=$(run_verify_gate "$RALPH_GH_WORKSPACE" "$sub_start_ref" "$parent_number"); then
                 log_status "WARN" "Sub-issue #$sub_number: VERIFY gate failed"
                 retry_context="TEST/BUILD GATE FAILED. The shell ran the project's verify command after your last turn and it was red. Fix the failures, run the command yourself until it is green, then re-report."$'\n\n'"$verify_failures"
                 record_result "true" "true"
@@ -419,7 +419,8 @@ process_parent_group() {
             #    grades itself.
             local verifier_failures
             if ! verifier_failures=$(run_verifier_gate "$RALPH_GH_WORKSPACE" "$RALPH_GH_REPO" \
-                    "$sub_number" "$(get_last_sub_title)" "$(get_last_sub_body)" "$sub_start_ref"); then
+                    "$sub_number" "$(get_last_sub_title)" "$(get_last_sub_body)" "$sub_start_ref" \
+                    "$verify_failures"); then
                 log_status "WARN" "Sub-issue #$sub_number: VERIFIER gate failed"
                 log_status "WARN" "Verifier findings:"$'\n'"$verifier_failures"
                 retry_context="INDEPENDENT VERIFIER REJECTED THE WORK. A separate reviewer read your diff against the acceptance criteria and found gaps. Address each item below — add the missing implementation or tests — then re-report with concrete evidence."$'\n\n'"$verifier_failures"
@@ -562,12 +563,14 @@ complete_group() {
     [[ -z "$parent_title" ]] && parent_title="Issue $parent_number"
 
     local closed_count=0
+    local is_pr_open=true
     if [[ "$is_standalone" == "true" ]]; then
         # Standalone issue — PR closes the issue directly
         log_status "INFO" "Opening PR for standalone issue #$parent_number..."
         if ! open_pr "$RALPH_GH_REPO" "$branch_name" "$RALPH_GH_MAIN_BRANCH" \
             "$parent_number" "$parent_title" "Standalone issue — no sub-issues"; then
             log_status "WARN" "Failed to open PR for standalone issue #$parent_number"
+            is_pr_open=false
         fi
 
         # Close the issue
@@ -584,6 +587,7 @@ complete_group() {
         if ! open_pr "$RALPH_GH_REPO" "$branch_name" "$RALPH_GH_MAIN_BRANCH" \
             "$parent_number" "$parent_title" "$completed_list"; then
             log_status "WARN" "Failed to open PR for parent #$parent_number"
+            is_pr_open=false
         fi
 
         # Close sub-issues. Use the union view (state + branch) so a sub whose
@@ -602,6 +606,11 @@ complete_group() {
             closed_count=$((closed_count + 1))
         done <<< "$subs_to_close"
     fi
+    # The PR body carries the list now, and a relabelled parent must not
+    # inherit it. Without worktree mode the state dir outlives the run, and a
+    # base commit's cached failures go stale with it (a flaky red stays red).
+    [[ "$is_pr_open" == "true" ]] && rm -f "$(pre_existing_failures_file "$parent_number")"
+    rm -rf "$RALPH_GH_STATE_DIR/verify_baseline"
 
     # Remove label from issue
     log_status "INFO" "Removing '$RALPH_GH_LABEL' label from #$parent_number"
@@ -714,13 +723,21 @@ defer_sub_for_human() {
         log_status "WARN" "Sub-issue #$sub_number: uncommitted changes saved to $patch_file, not committed"
     fi
 
-    comment_on_issue "$RALPH_GH_REPO" "$sub_number" \
-        "ralph-gh stopped here: this sub-issue reported a **terminal block** (\`EXIT_SIGNAL: true\`). Retrying won't clear it — a human decision is needed.
+    # A block that proposes amending a criterion gets the proposals laid out
+    # for a ruling; ralph never edits the issue body itself.
+    local block_comment
+    block_comment=$(build_amendment_comment "$parent_number" "$recommendation" "$patch_note")
+    if [[ -n "$block_comment" ]]; then
+        record_last_amendments
+    else
+        block_comment="ralph-gh stopped here: this sub-issue reported a **terminal block** (\`EXIT_SIGNAL: true\`). Retrying won't clear it — a human decision is needed.
 
 **Model recommendation:**
 ${recommendation:-(none provided)}${patch_note}
 
-This sub-issue has been flagged for review. Resolve the blocker, then re-trigger parent #$parent_number." || true
+This sub-issue has been flagged for review. Resolve the blocker, then re-trigger parent #$parent_number."
+    fi
+    comment_on_issue "$RALPH_GH_REPO" "$sub_number" "$block_comment" || true
 
     # Route into the existing HITL hold flow when a hold label is configured:
     # label the sub so future runs defer it, then finalize as a held group
@@ -1364,6 +1381,7 @@ case "${1:-}" in
         echo "  RALPH_GH_VERIFIER_MODEL    Independent verifier model (default: claude-sonnet-5)"
         echo "  RALPH_GH_REVIEW_MODEL      Pre-PR review model (default: claude-sonnet-5)"
         echo "  RALPH_GH_VERIFY_CMD        Test/build command run by the shell after each turn (default: .ralph/verify.sh)"
+        echo "  RALPH_GH_VERIFY_BASELINE   1/0 — pass verify failures already red on the base commit (default: 1)"
         echo "  RALPH_GH_VERIFIER_ENABLED  1/0 — run the independent verifier gate (default: 1)"
         echo "  RALPH_GH_PERMISSION_MODE   Claude permission mode (default: auto)"
         echo "  RALPH_GH_DENY_RULES        Comma-separated hard deny rules passed via --settings"

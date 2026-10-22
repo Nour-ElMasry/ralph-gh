@@ -6,7 +6,7 @@
 # a regex over prose. .ralph/PROMPT.md is delivered as a system prompt by the
 # runner (see claude_runner.sh), so it is NOT prepended here.
 
-WORKER_SCHEMA='{"type":"object","properties":{"status":{"type":"string","enum":["IN_PROGRESS","COMPLETE","BLOCKED"]},"exit_signal":{"type":"boolean"},"tests_status":{"type":"string","enum":["PASSING","FAILING","NOT_RUN"]},"files_modified":{"type":"integer"},"recommendation":{"type":"string"},"acceptance":{"type":"array","items":{"type":"object","properties":{"criterion":{"type":"string"},"met":{"type":"boolean"},"evidence":{"type":"string"}},"required":["criterion","met","evidence"]}}},"required":["status","exit_signal","tests_status","recommendation","acceptance"]}'
+WORKER_SCHEMA='{"type":"object","properties":{"status":{"type":"string","enum":["IN_PROGRESS","COMPLETE","BLOCKED"]},"exit_signal":{"type":"boolean"},"tests_status":{"type":"string","enum":["PASSING","FAILING","NOT_RUN"]},"files_modified":{"type":"integer"},"recommendation":{"type":"string"},"acceptance":{"type":"array","items":{"type":"object","properties":{"criterion":{"type":"string"},"met":{"type":"boolean"},"evidence":{"type":"string"}},"required":["criterion","met","evidence"]}},"amendments":{"type":"array","items":{"type":"object","properties":{"criterion":{"type":"string"},"proposed":{"type":"string"},"reason":{"type":"string"},"evidence":{"type":"string"}},"required":["criterion","proposed","reason","evidence"]}}},"required":["status","exit_signal","tests_status","recommendation","acceptance"]}'
 
 REVIEW_SCHEMA='{"type":"object","properties":{"status":{"type":"string","enum":["COMPLETE","BLOCKED"]},"findings_fixed":{"type":"integer"},"findings_open":{"type":"array","items":{"type":"string"}},"recommendation":{"type":"string"}},"required":["status","findings_fixed","findings_open","recommendation"]}'
 
@@ -78,7 +78,8 @@ build_full_prompt() {
     prompt+=$'5. **Commit with descriptive conventional commit messages** (`feat:`, `fix:`, `test:`, `refactor:`).\n'
     prompt+=$'6. Do NOT close issues or open PRs — handled externally. Do NOT force-push, reset, or switch branches.\n'
     prompt+=$'7. Do NOT modify `.ralph-gh/` or `.ralph/` state files.\n'
-    prompt+="$changeset_rule"$'\n\n'
+    prompt+="$changeset_rule"$'\n'
+    prompt+=$'9. **A criterion you cannot meet as written is a question for a human.** If it asks for something outside this repository (a PR description, an issue\'s state, a deploy), contradicts the code or another criterion, or names a file or API that does not exist, do not reinterpret it into something you can meet. Finish every criterion you can, then report that one `met: false`, propose the wording you would accept in `amendments`, and return `BLOCKED` with `exit_signal: true`. ralph-gh posts the proposal for a human to rule on; it never edits the issue.\n\n'
 
     prompt+=$(cat <<'REPORT_BLOCK'
 ## Final report (REQUIRED)
@@ -86,10 +87,11 @@ build_full_prompt() {
 Your final action must be the structured output the CLI enforces (JSON schema). Fill it honestly:
 
 - `status`: `COMPLETE` only when every acceptance criterion is met and the tests/build are green in this turn. `BLOCKED` when you cannot proceed. `IN_PROGRESS` otherwise.
-- `exit_signal`: `true` only together with `BLOCKED`, when a human decision is required and retrying cannot help (out of scope, environmental blocker, contradictory requirements). Retryable problems keep it `false`.
+- `exit_signal`: `true` only together with `BLOCKED`, when a human decision is required and retrying cannot help (out of scope, environmental blocker, contradictory requirements, a criterion that cannot be met as written). Retryable problems keep it `false`.
 - `tests_status`: `PASSING` | `FAILING` | `NOT_RUN` — the result of the last run you actually executed in this turn.
 - `files_modified`: number of files you changed.
 - `acceptance`: one entry per checklist item (`- [ ]` / `- [x]`) in the issue body, criterion text verbatim. `met: true` only with concrete `evidence` (path:line, test name, or command output). If the issue has no checklist, list 2-4 criteria you inferred from the description.
+- `amendments` (optional): one entry per criterion that cannot be met as written (rule 9) — `criterion` verbatim, `proposed` replacement wording (empty to drop it), `reason`, and `evidence` (paths, commands or output showing why). Only together with `BLOCKED` + `exit_signal: true`; a criterion you propose to amend is never `met: true`.
 - `recommendation`: one line for the orchestrator or the human reviewer.
 REPORT_BLOCK
 )
@@ -309,6 +311,61 @@ get_last_recommendation() {
     jq -r '.recommendation // empty' "$status_file" 2>/dev/null || true
 }
 
+# Echo the amendments the most recent structured report proposes, as markdown
+# tables for an issue comment (original, proposed, reason, evidence), or
+# nothing. Always exits 0. Cells are markdown, as the issue body is, with the
+# HTML that could swallow the rest of the comment (an unclosed <!--) and the
+# pipes that would split a row entity-escaped — backslashes too, which would
+# otherwise escape the entity after them.
+format_last_amendments() {
+    local status_file="$RALPH_GH_STATE_DIR/.last_status.json"
+    [[ -f "$status_file" ]] || return 0
+    jq -r '
+        def cell: tostring | gsub("\r"; "") | gsub("&"; "&amp;") | gsub("\\\\"; "&#92;") | gsub("<"; "&lt;")
+            | gsub("\\|"; "&#124;") | gsub("\n"; "<br>");
+        (.amendments // []) | to_entries[] |
+        "| Amendment \(.key + 1) | |\n|---|---|\n"
+        + "| **Original** | \(.value.criterion | cell) |\n"
+        + "| **Proposed** | \(if (.value.proposed | length) == 0 then "_(drop this criterion)_" else (.value.proposed | cell) end) |\n"
+        + "| **Reason** | \(.value.reason | cell) |\n"
+        + "| **Evidence** | \(.value.evidence | cell) |\n"
+    ' "$status_file" 2>/dev/null || true
+}
+
+# Echo the issue comment that hands a terminal block's amendments to a human,
+# or nothing when the most recent report proposes none.
+#   $1 = parent number, $2 = recommendation, $3 = note appended after it
+build_amendment_comment() {
+    local parent_number=$1
+    local recommendation=$2
+    local note=${3:-}
+    local amendments
+    amendments=$(format_last_amendments)
+    [[ -n "$amendments" ]] || return 0
+    cat <<EOF
+ralph-gh stopped here: an acceptance criterion can't be met as written. It proposes the amendment(s) below and has **not** changed this issue.
+
+${amendments}
+
+**Model recommendation:**
+${recommendation:-(none provided)}${note}
+
+Edit the issue body to accept an amendment, or reply with a ruling, then re-trigger parent #${parent_number}.
+EOF
+}
+
+# Record one telemetry gate event per amendment in the most recent report, so
+# `--stats` shows how often the issue text, not the code, stopped a run.
+record_last_amendments() {
+    local status_file="$RALPH_GH_STATE_DIR/.last_status.json"
+    [[ -f "$status_file" ]] || return 0
+    local criterion
+    while IFS= read -r criterion; do
+        [[ -z "$criterion" ]] && continue
+        telemetry_record_gate "amendment" "proposed" "$criterion" 2>/dev/null || true
+    done < <(jq -r '(.amendments // [])[] | .criterion | gsub("\n"; " ")' "$status_file" 2>/dev/null)
+}
+
 # Echo the title/body captured by execute_for_sub_issue (for the verifier gate).
 get_last_sub_title() { cat "$RALPH_GH_STATE_DIR/.last_sub_title" 2>/dev/null || true; }
 get_last_sub_body()  { cat "$RALPH_GH_STATE_DIR/.last_sub_body"  2>/dev/null || true; }
@@ -322,6 +379,16 @@ get_last_sub_body()  { cat "$RALPH_GH_STATE_DIR/.last_sub_body"  2>/dev/null || 
 # Returns: 0 if all criteria met (or sub-issue has no criteria), 1 if any unmet
 # OR no report found.
 run_acceptance_gate() {
+    # A proposed amendment means a criterion is not met as written. A report
+    # that reaches this gate did not stop for a human (a terminal block never
+    # gets here), so it must either meet the criterion or stop — and it must
+    # never also claim the criterion it wants changed.
+    local amendments_failure
+    if amendments_failure=$(_acceptance_amendments_failure); then
+        echo "$amendments_failure"
+        return 1
+    fi
+
     # Auto-skip when the sub-issue body has no checklist markers. Gate is
     # enforced whenever there ARE criteria; skipped when there aren't any.
     local criteria_flag_file="$RALPH_GH_STATE_DIR/.last_sub_has_criteria"
@@ -355,6 +422,36 @@ run_acceptance_gate() {
     fi
 
     telemetry_record_gate "acceptance" "pass" "$count criteria" 2>/dev/null || true
+    return 0
+}
+
+# Echo the retry message for a report that proposes amendments without a
+# terminal block, and succeed; fail (echo nothing) when it proposes none.
+_acceptance_amendments_failure() {
+    local status_file="$RALPH_GH_STATE_DIR/.last_status.json"
+    [[ -s "$status_file" ]] || return 1
+    local amended claimed
+    amended=$(jq -r '(.amendments // [])[] | "- \(.criterion)"' "$status_file" 2>/dev/null)
+    [[ -n "$amended" ]] || return 1
+    claimed=$(jq -r '
+        def norm: tostring | gsub("^\\s+|\\s+$"; "");
+        [(.acceptance // [])[] | select(.met == true) | .criterion | norm] as $met
+        | (.amendments // [])[] | select((.criterion | norm) as $c | $met | index($c)) | "- \(.criterion)"
+    ' "$status_file" 2>/dev/null)
+
+    if [[ -n "$claimed" ]]; then
+        telemetry_record_gate "acceptance" "fail" "amended criterion reported met" 2>/dev/null || true
+        echo "You proposed amending these criteria and also reported them met. A criterion you propose to amend is not met as written:"
+        echo ""
+        echo "$claimed"
+    else
+        telemetry_record_gate "acceptance" "fail" "amendment without a terminal block" 2>/dev/null || true
+        echo "You proposed amending these criteria but did not stop for a human:"
+        echo ""
+        echo "$amended"
+    fi
+    echo ""
+    echo "Either meet each one as written and drop its amendment, or report it \`met: false\` and return \`BLOCKED\` with \`exit_signal: true\` so a human can rule on the amendment."
     return 0
 }
 
@@ -517,6 +614,7 @@ execute_review() {
 export -f build_full_prompt execute_for_sub_issue
 export -f build_review_prompt execute_review
 export -f get_saved_session_id clear_saved_session get_last_recommendation
+export -f format_last_amendments build_amendment_comment record_last_amendments _acceptance_amendments_failure
 export -f get_last_sub_title get_last_sub_body
 export -f run_acceptance_gate
 export -f run_e2e_pre_check

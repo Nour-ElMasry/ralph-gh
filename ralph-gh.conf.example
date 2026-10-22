@@ -42,6 +42,7 @@ RALPH_GH_MAX_BUDGET_USD=""                # --max-budget-usd per Claude call; em
 #   3. verifier   — a separate read-only Claude session grades the diff
 RALPH_GH_VERIFY_CMD=""                    # empty = <repo>/.ralph/verify.sh if present, else the gate is skipped (WARN)
 RALPH_GH_VERIFY_TIMEOUT_MINUTES=15
+RALPH_GH_VERIFY_BASELINE=1                # 1 = failures verify.sh lists in $RALPH_VERIFY_FAILURES_FILE that are also red on the base commit pass with a WARN
 RALPH_GH_VERIFIER_ENABLED=1
 RALPH_GH_VERIFIER_TIMEOUT_MINUTES=10
 

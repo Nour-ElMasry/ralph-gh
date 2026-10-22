@@ -126,6 +126,14 @@ _spawn_sub_worker() {
             # human-hold state in parallel mode is future work.
             if [[ $r -eq 2 ]]; then
                 log_status "WARN" "Sub #$sub_issue: terminal block (EXIT_SIGNAL) — not retrying"
+                # Proposed amendments still reach a human here; the failed
+                # DAG state alone would lose them.
+                local amendment_comment
+                amendment_comment=$(build_amendment_comment "$parent_issue" "$(get_last_recommendation)")
+                if [[ -n "$amendment_comment" ]]; then
+                    record_last_amendments
+                    comment_on_issue "$RALPH_GH_REPO" "$sub_issue" "$amendment_comment" || true
+                fi
                 result=2
                 break
             fi
@@ -138,13 +146,13 @@ _spawn_sub_worker() {
 
             local acceptance_failures
             if ! acceptance_failures=$(run_acceptance_gate 2>&1); then
-                retry_context="ACCEPTANCE GATE FAILED. Address each criterion and re-report with them met. Evidence (file:line or test name) is required for each."$'\n\n'"$acceptance_failures"
+                retry_context="ACCEPTANCE GATE FAILED. Address each point below, then re-report. Every criterion you report met needs evidence (file:line or test name)."$'\n\n'"$acceptance_failures"
                 record_result "true" "true"
                 continue
             fi
 
             local verify_failures
-            if ! verify_failures=$(run_verify_gate "$sub_worktree" "$sub_start_ref"); then
+            if ! verify_failures=$(run_verify_gate "$sub_worktree" "$sub_start_ref" "$parent_issue"); then
                 retry_context="TEST/BUILD GATE FAILED. The shell ran the project's verify command after your last turn and it was red. Fix the failures, run the command yourself until it is green, then re-report."$'\n\n'"$verify_failures"
                 record_result "true" "true"
                 continue
@@ -152,7 +160,8 @@ _spawn_sub_worker() {
 
             local verifier_failures
             if ! verifier_failures=$(run_verifier_gate "$sub_worktree" "$RALPH_GH_REPO" \
-                    "$sub_issue" "$(get_last_sub_title)" "$(get_last_sub_body)" "$sub_start_ref"); then
+                    "$sub_issue" "$(get_last_sub_title)" "$(get_last_sub_body)" "$sub_start_ref" \
+                    "$verify_failures"); then
                 retry_context="INDEPENDENT VERIFIER REJECTED THE WORK. A separate reviewer read your diff against the acceptance criteria and found gaps. Address each item below — add the missing implementation or tests — then re-report with concrete evidence."$'\n\n'"$verifier_failures"
                 record_result "true" "true"
                 continue

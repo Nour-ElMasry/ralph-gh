@@ -192,6 +192,7 @@ Optional. Applies across all repos:
 | `RALPH_GH_PERMISSION_MODE` | `auto` | Claude Code permission mode for unattended runs |
 | `RALPH_GH_DENY_RULES` | force-push, reset, clean, PR/issue mutation, … | Hard deny list auto mode cannot override |
 | `RALPH_GH_VERIFY_CMD` | `.ralph/verify.sh` if present | Test/build command the shell runs after every turn |
+| `RALPH_GH_VERIFY_BASELINE` | `1` | On a red verify, re-run it on the base commit and pass failures that were already red there (`0` = every red fails) |
 | `RALPH_GH_VERIFIER_ENABLED` | `1` | Run the independent verifier gate |
 | `RALPH_GH_TELEMETRY_FILE` | `~/.ralph-gh/telemetry.jsonl` | Run records; read with `ralph-gh --stats` |
 | `RALPH_GH_CGROUP` | `1` | Re-exec every run inside a bounded systemd slice (`0` = uncapped) |
@@ -220,7 +221,7 @@ proceeds uncapped with a `WARN`.
 | `.ralphrc` | Override any global setting for this repo |
 | `.ralph/PROMPT.md` | System prompt (sent via `--append-system-prompt-file`) — tech stack, conventions, architecture |
 | `.ralph/AGENT.md` | Build, test, and run instructions (injected into the task prompt) |
-| `.ralph/verify.sh` | Test/build oracle the **shell** runs after every Claude turn. Exit 0 = green. Receives `RALPH_SUB_START_REF` to scope to the sub-issue's diff. Without it the verify gate is skipped with a warning. |
+| `.ralph/verify.sh` | Test/build oracle the **shell** runs after every Claude turn. Exit 0 = green. Receives `RALPH_SUB_START_REF` to scope to the sub-issue's diff. To opt into the baseline, write one stable id per failing thing (a package, a test file) to `$RALPH_VERIFY_FAILURES_FILE` before exiting red. Without it the verify gate is skipped with a warning. |
 
 **Priority:** defaults < global config < `.ralphrc` < environment variables
 
@@ -306,6 +307,33 @@ claude -p  (implementer, structured JSON report)
    any red --> re-invoke the implementer (same session) with the failure as context
    all green --> commit, tick the checkbox on GitHub, next sub-issue
 ```
+
+**Pre-existing failures.** A red verify is not always the branch's fault. When
+`verify.sh` lists its failures in `$RALPH_VERIFY_FAILURES_FILE`, the shell
+re-runs it on the sub-issue's base commit, in a throwaway worktree under
+`~/.ralph-gh/baselines/`, scoped to the same packages as the branch run
+(`RALPH_VERIFY_BASELINE=1` is set there). Failures that were red on base too
+pass the gate with a `WARN`; only new ones go back to the implementer, with
+the inherited ones named. The verifier is told which failures it let through,
+so a criterion that asks for one of them to be fixed still fails. The PR body
+lists them under *Pre-existing failures*, each with the commit it was red on
+and whether that commit is on `main` or only on this branch (an earlier
+sub-issue may have caused it). Baseline runs are cached per base commit for
+the rest of the parent's run. The list must name every failing check — build,
+typecheck and lint, not only tests — or a failure it leaves out can hide
+behind a pre-existing one. A verify that lists nothing, times out or is killed
+by a signal, or whose baseline can't be built, fails exactly as before.
+
+**Criteria that can't be met as written.** If an acceptance criterion is
+outside what the implementer can do (it names something only a human can
+change, or contradicts another criterion), the implementer returns `BLOCKED`
+with `exit_signal: true` and proposes wording in `amendments` (original,
+proposed, reason, evidence). The verifier can flag such a criterion
+`unmeetable`, which steers the retry toward that route. ralph-gh posts the
+proposal as a comment on the sub-issue and stops for a human; it never edits
+the issue. A report that proposes an amendment without stopping, or also claims
+the same criterion met, fails the acceptance gate. `--stats` counts proposals
+in the `amend` column.
 
 Retries are bounded by `RALPH_GH_MAX_LOOPS_PER_ISSUE` and the circuit breaker. Every Claude call and gate verdict is one line in the telemetry file; `ralph-gh --stats` summarises loops, turns, cost and gate failures per parent.
 

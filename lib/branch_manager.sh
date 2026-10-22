@@ -135,6 +135,7 @@ Closes #${parent_number}
 
 ### Completed sub-issues:
 ${completed_subs}
+$(pre_existing_failures_section "$parent_number")
 
 ---
 Automated by [ralph-gh](https://github.com/Nour-ElMasry/ralph-gh)
@@ -221,6 +222,7 @@ ${completed_subs}
 
 ### Failure reason:
 ${failure_reason}
+$(pre_existing_failures_section "$parent_number")
 
 ---
 Automated by [ralph-gh](https://github.com/Nour-ElMasry/ralph-gh)
