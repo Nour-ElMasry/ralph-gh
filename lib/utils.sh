@@ -35,6 +35,16 @@ log_status() {
     fi
 }
 
+# INT/TERM handler: take the whole process group down, once. The trap is
+# cleared before `kill 0`, because that TERM reaches this shell too and a live
+# trap would catch it again, logging and re-signalling the group in a loop.
+shutdown_on_signal() {
+    trap - INT TERM
+    log_status "WARN" "Caught signal, shutting down..."
+    kill 0 2>/dev/null
+    exit 130
+}
+
 # Cross-platform timeout wrapper
 # Sends TERM first, then KILL after 10s to ensure full cleanup
 portable_timeout() {

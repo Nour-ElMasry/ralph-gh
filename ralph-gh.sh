@@ -1052,7 +1052,7 @@ process_targeted_in_worktree() {
     worktree_cleanup "$issue_number" "$([[ $result -eq 0 ]] && echo success || echo failure)"
 
     # Restore default signal trap
-    trap 'log_status "WARN" "Caught signal, shutting down..."; kill 0 2>/dev/null; exit 130' INT TERM
+    trap shutdown_on_signal INT TERM
 
     if [[ $result -ne 0 ]]; then
         log_status "WARN" "Failed to process targeted issue #$issue_number"
@@ -1106,7 +1106,7 @@ run_command() {
     fi
 
     # Trap Ctrl+C / SIGTERM — kill entire process group for clean shutdown
-    trap 'log_status "WARN" "Caught signal, shutting down..."; kill 0 2>/dev/null; exit 130' INT TERM
+    trap shutdown_on_signal INT TERM
 
     local other_runs
     other_runs=$(count_other_ralph_runs "$RALPH_GH_WORKSPACE/.ralph-workers" "${_TARGET_ISSUES[0]:-}")
@@ -1186,7 +1186,7 @@ qa_command() {
         log_status "ERROR" "Another ralph-gh QA run is already using this workspace's stack (lock: $lock_file)"
         exit 1
     fi
-    trap 'log_status "WARN" "Caught signal, shutting down..."; kill 0 2>/dev/null; exit 130' INT TERM
+    trap shutdown_on_signal INT TERM
 
     log_status "INFO" "QA mode — repo $RALPH_GH_REPO, labels '$RALPH_GH_LABEL' + '$RALPH_QA_LABEL'${RALPH_QA_SCENARIOS:+, targeted re-test of $RALPH_QA_SCENARIOS}"
     qa_main "${_TARGET_ISSUES[@]}" || exit 1
