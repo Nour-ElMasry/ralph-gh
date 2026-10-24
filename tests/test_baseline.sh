@@ -11,6 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$SCRIPT_DIR/lib/utils.sh"
 source "$SCRIPT_DIR/lib/telemetry.sh"
 source "$SCRIPT_DIR/lib/verify_gate.sh"
+source "$SCRIPT_DIR/lib/review_panel.sh"
 source "$SCRIPT_DIR/lib/branch_manager.sh"
 source "$SCRIPT_DIR/lib/worktree_manager.sh"
 

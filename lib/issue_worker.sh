@@ -8,8 +8,6 @@
 
 WORKER_SCHEMA='{"type":"object","properties":{"status":{"type":"string","enum":["IN_PROGRESS","COMPLETE","BLOCKED"]},"exit_signal":{"type":"boolean"},"tests_status":{"type":"string","enum":["PASSING","FAILING","NOT_RUN"]},"files_modified":{"type":"integer"},"recommendation":{"type":"string"},"acceptance":{"type":"array","items":{"type":"object","properties":{"criterion":{"type":"string"},"met":{"type":"boolean"},"evidence":{"type":"string"}},"required":["criterion","met","evidence"]}},"amendments":{"type":"array","items":{"type":"object","properties":{"criterion":{"type":"string"},"proposed":{"type":"string"},"reason":{"type":"string"},"evidence":{"type":"string"}},"required":["criterion","proposed","reason","evidence"]}}},"required":["status","exit_signal","tests_status","recommendation","acceptance"]}'
 
-REVIEW_SCHEMA='{"type":"object","properties":{"status":{"type":"string","enum":["COMPLETE","BLOCKED"]},"findings_fixed":{"type":"integer"},"findings_open":{"type":"array","items":{"type":"string"}},"recommendation":{"type":"string"}},"required":["status","findings_fixed","findings_open","recommendation"]}'
-
 # Build the user-turn prompt: issue context + rules + report contract.
 # When is_last_sub=true, also instructs the model to create the parent-group
 # changeset in the same Claude call (saves a separate end-of-group invocation).
@@ -455,51 +453,6 @@ _acceptance_amendments_failure() {
     return 0
 }
 
-# Build the review prompt for post-completion /review pass
-build_review_prompt() {
-    local workspace=$1
-    local main_branch=$2
-    local parent_issue_number=$3
-
-    local prompt=""
-
-    # Add AGENT.md build instructions if available
-    if [[ -f "$workspace/.ralph/AGENT.md" ]]; then
-        prompt+="## Build & Run Instructions"
-        prompt+=$'\n\n'
-        prompt+=$(cat "$workspace/.ralph/AGENT.md")
-        prompt+=$'\n\n'
-    fi
-
-    prompt+="## Task: Pre-PR Review (Best Practices Audit)"
-    prompt+=$'\n\n'
-    prompt+="You are reviewing the complete diff of branch work for parent issue #${parent_issue_number} before a PR is opened."
-    prompt+=$'\n\n'
-    prompt+="Run \`/review-best-practices\` to analyze all changes on this branch compared to \`${main_branch}\`. This is a superset of \`/review\` — it runs the standard pre-landing review first (SQL safety, trust boundaries, race conditions, test coverage) then layers on a best-practices audit (SOLID, DRY, KISS, YAGNI, clean code)."
-    prompt+=$'\n\n'
-    prompt+="If the audit surfaces issues, fix the critical and best-practices findings and commit with conventional commit messages."
-    prompt+=$'\n'
-    prompt+="If no issues are found, report COMPLETE without making any changes."
-    prompt+=$'\n\n'
-
-    prompt+=$(cat <<'RULES'
-## Rules
-1. Run /review-best-practices first — do not skip it
-2. Fix critical (from /review) and best-practices findings
-3. Commit fixes with descriptive conventional commit messages (e.g. fix: ..., refactor: ...)
-4. Do NOT close issues or open PRs - that is handled externally
-5. Do NOT modify .ralph-gh/ or .ralph/ state files
-6. If the audit is clean (no findings), do NOT make any file changes — report COMPLETE
-
-## Final report (REQUIRED)
-
-Deliver the structured output the CLI enforces: `status` (COMPLETE, or BLOCKED if you could not run the review), `findings_fixed` (count), `findings_open` (findings you chose not to fix, one line each, with why), `recommendation` (one line for the human reviewer).
-RULES
-)
-
-    echo "$prompt"
-}
-
 # Run e2e tests and return failure tail on stderr if red. Returns 0 if green, 1 if red.
 # Uses the lead-formz test docker-compose layout; no-op if the compose file isn't present.
 run_e2e_pre_check() {
@@ -526,93 +479,13 @@ run_e2e_pre_check() {
         return 0
     fi
 
-    log_status "WARN" "E2E pre-check failed — findings will be passed to the review prompt"
+    log_status "WARN" "E2E pre-check failed — the failures go to the review fixer"
     # Emit last 200 lines on stderr so the caller can inject them into the prompt
     tail -200 "$e2e_log" >&2
     return 1
 }
 
-# Execute a /review pass against the current branch before PR creation
-# Returns: 0=success (review done, fixes applied if any), 1=failure
-execute_review() {
-    local workspace=$1
-    local repo=$2
-    local main_branch=$3
-    local parent_issue_number=$4
-    local allowed_tools=$5
-    local timeout_minutes=$6
-
-    local timeout_seconds=$((timeout_minutes * 60))
-
-    log_status "INFO" "Running pre-PR /review for parent #$parent_issue_number on ${RALPH_GH_REVIEW_MODEL:-default model}..."
-
-    # Run e2e pre-check; capture failure output for injection into prompt
-    local e2e_failures=""
-    if ! e2e_failures=$(run_e2e_pre_check "$workspace" 2>&1 >/dev/null); then
-        : # e2e_failures contains the tail of the failure log
-    else
-        e2e_failures=""
-    fi
-
-    # Build the review prompt
-    local prompt
-    prompt=$(build_review_prompt "$workspace" "$main_branch" "$parent_issue_number")
-
-    if [[ -n "$e2e_failures" ]]; then
-        prompt+=$'\n\n## E2E TEST FAILURES (fix as part of this review)\n\n'
-        prompt+="The following e2e test failures were detected. Diagnose and fix them alongside any review findings. Run \`pnpm --filter api test:e2e\` after your fixes to verify."$'\n\n'
-        prompt+='```'$'\n'"$e2e_failures"$'\n''```'$'\n'
-    fi
-
-    local stamp
-    stamp=$(date '+%Y%m%d_%H%M%S')
-    local output_file="$RALPH_GH_STATE_DIR/logs/claude_review_${stamp}.log"
-    local stderr_file="$RALPH_GH_STATE_DIR/logs/claude_review_${stamp}.stderr.log"
-
-    log_status "INFO" "Invoking Claude Code for review (timeout: ${timeout_minutes}m)..."
-
-    local exit_code=0
-    run_claude "$workspace" "$prompt" "$output_file" "$stderr_file" "$timeout_seconds" \
-        "${RALPH_GH_REVIEW_MODEL:-}" "$REVIEW_SCHEMA" "" "$allowed_tools" "" "review" || exit_code=$?
-
-    if [[ $exit_code -eq 124 ]]; then
-        log_status "WARN" "Review timed out after ${timeout_minutes} minutes"
-        return 1
-    fi
-
-    if [[ $exit_code -ne 0 ]]; then
-        log_status "ERROR" "Review Claude invocation exited with code $exit_code"
-        [[ -s "$stderr_file" ]] && tail -10 "$stderr_file" >&2
-        return 1
-    fi
-
-    local so
-    so=$(claude_structured_output "$output_file")
-    if [[ -n "$so" ]]; then
-        local fixed open
-        fixed=$(printf '%s' "$so" | jq -r '.findings_fixed // 0')
-        open=$(printf '%s' "$so" | jq -r '(.findings_open // []) | length')
-        log_status "INFO" "Review report: $fixed finding(s) fixed, $open left open — $(printf '%s' "$so" | jq -r '.recommendation // ""')"
-        if [[ "$open" -gt 0 ]]; then
-            printf '%s' "$so" | jq -r '.findings_open[] | "  - " + .' >&2
-        fi
-    fi
-
-    # Commit any review fixes
-    if ! git diff --quiet HEAD 2>/dev/null || ! git diff --cached --quiet 2>/dev/null || \
-       [[ -n "$(git ls-files --others --exclude-standard 2>/dev/null)" ]]; then
-        git add -A -- ':!.ralph-gh' 2>/dev/null || true
-        git commit -m "fix(ralph): address review findings for #$parent_issue_number" 2>/dev/null || true
-        log_status "SUCCESS" "Review fixes committed"
-    else
-        log_status "INFO" "Review complete — no fixes needed"
-    fi
-
-    return 0
-}
-
 export -f build_full_prompt execute_for_sub_issue
-export -f build_review_prompt execute_review
 export -f get_saved_session_id clear_saved_session get_last_recommendation
 export -f format_last_amendments build_amendment_comment record_last_amendments _acceptance_amendments_failure
 export -f get_last_sub_title get_last_sub_body

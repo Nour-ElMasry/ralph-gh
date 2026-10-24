@@ -177,7 +177,9 @@ run_claude() {
 
     # The CLI is dead (exited or killed) — anything still running in the
     # worktree is an orphan of this invocation and would poison the next loop.
-    reap_workspace_orphans "$workspace"
+    # A caller running several sessions in one workspace (the review panel)
+    # sets RALPH_GH_REAP_ORPHANS=0 and reaps once they have all exited.
+    [[ "${RALPH_GH_REAP_ORPHANS:-1}" == "1" ]] && reap_workspace_orphans "$workspace"
 
     if declare -F telemetry_record_claude >/dev/null 2>&1; then
         telemetry_record_claude "$output_file" "$phase" "$exit_code" "$model" || true

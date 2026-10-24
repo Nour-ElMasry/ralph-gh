@@ -22,6 +22,7 @@ source "$SCRIPT_DIR/lib/parallel_orchestrator.sh"
 source "$SCRIPT_DIR/lib/telemetry.sh"
 source "$SCRIPT_DIR/lib/claude_runner.sh"
 source "$SCRIPT_DIR/lib/verify_gate.sh"
+source "$SCRIPT_DIR/lib/review_panel.sh"
 source "$SCRIPT_DIR/lib/resource_caps.sh"
 source "$SCRIPT_DIR/lib/qa_runner.sh"
 
@@ -40,7 +41,6 @@ CB_NO_PROGRESS_THRESHOLD="${CB_NO_PROGRESS_THRESHOLD:-3}"
 CB_SAME_ERROR_THRESHOLD="${CB_SAME_ERROR_THRESHOLD:-5}"
 RALPH_GH_MAX_LOOPS_PER_ISSUE="${RALPH_GH_MAX_LOOPS_PER_ISSUE:-8}"  # Max Claude invocations per sub-issue (includes acceptance-gate retries)
 RALPH_GH_MAX_LOOPS_TOTAL="${RALPH_GH_MAX_LOOPS_TOTAL:-0}"          # Max total invocations per parent group (0=unlimited)
-RALPH_GH_MAX_REVIEW_RUNS="${RALPH_GH_MAX_REVIEW_RUNS:-1}"          # Max end-of-group /review-best-practices runs before opening PR
 RALPH_MAX_PARALLEL="${RALPH_MAX_PARALLEL:-1}"                      # Max concurrent sub-workers per parent (1=disable parallelism, default for safety)
 RALPH_PARALLEL_ENABLED="${RALPH_PARALLEL_ENABLED:-0}"              # Master switch for the parallel scheduler (0=serial only, 1=honor RALPH_MAX_PARALLEL + DAG)
 RALPH_RECONCILER_MODEL="${RALPH_RECONCILER_MODEL:-claude-sonnet-5}"  # Model for merge reconciliation (mechanical work)
@@ -48,9 +48,9 @@ RALPH_RECONCILER_TIMEOUT_MINUTES="${RALPH_RECONCILER_TIMEOUT_MINUTES:-15}"
 # Model routing. RALPH_GH_MODEL (implementation) is resolved in load_config so a
 # .ralphrc that exports ANTHROPIC_MODEL still wins over the built-in default.
 RALPH_GH_MODEL="${RALPH_GH_MODEL:-}"
-RALPH_GH_REVIEW_MODEL="${RALPH_GH_REVIEW_MODEL:-claude-sonnet-5}"    # Pre-PR /review pass
-# Verifier / verify-gate / runner / telemetry defaults live in their lib files:
+# Verifier / verify-gate / review / runner / telemetry defaults live in their lib files:
 #   lib/verify_gate.sh   RALPH_GH_VERIFY_CMD, RALPH_GH_VERIFIER_MODEL, ...
+#   lib/review_panel.sh  RALPH_GH_REVIEWERS, RALPH_GH_REVIEW_MODEL, RALPH_GH_MAX_REVIEW_RUNS, ...
 #   lib/claude_runner.sh RALPH_GH_PERMISSION_MODE, RALPH_GH_DENY_RULES, RALPH_GH_FALLBACK_MODEL, ...
 #   lib/telemetry.sh     RALPH_GH_TELEMETRY_FILE
 
@@ -444,39 +444,14 @@ process_parent_group() {
         done
     done
 
-    # All sub-issues completed — run /review-best-practices before opening PR.
-    # Loop up to RALPH_GH_MAX_REVIEW_RUNS times: each run invokes Claude which
-    # fixes what it can and commits. Exit early if a run produces zero git
-    # changes (meaning the branch is clean and no further passes are needed).
-    log_status "INFO" "All sub-issues done. Running pre-PR /review-best-practices (max $RALPH_GH_MAX_REVIEW_RUNS run(s))..."
-    local review_run=0
-    while [[ $review_run -lt $RALPH_GH_MAX_REVIEW_RUNS ]]; do
-        review_run=$((review_run + 1))
-        log_status "INFO" "Pre-PR review run $review_run/$RALPH_GH_MAX_REVIEW_RUNS"
-        clear_saved_session
-        local head_before
-        head_before=$(git rev-parse HEAD 2>/dev/null)
-
-        if ! execute_review \
-            "$RALPH_GH_WORKSPACE" \
-            "$RALPH_GH_REPO" \
-            "$RALPH_GH_MAIN_BRANCH" \
-            "$parent_number" \
-            "$RALPH_GH_ALLOWED_TOOLS" \
-            "$CLAUDE_TIMEOUT_MINUTES"; then
-            log_status "WARN" "Pre-PR review run $review_run failed or timed out"
-            break
-        fi
-
-        local head_after
-        head_after=$(git rev-parse HEAD 2>/dev/null)
-        if [[ "$head_before" == "$head_after" ]]; then
-            log_status "SUCCESS" "Pre-PR review run $review_run made no changes — branch is clean, skipping remaining runs"
-            break
-        fi
-
-        log_status "INFO" "Pre-PR review run $review_run committed fixes (HEAD ${head_before:0:8} -> ${head_after:0:8})"
-    done
+    # All sub-issues completed — the pre-PR review panel (lib/review_panel.sh).
+    # Its leftovers go into the PR body; an unresolved blocker means a draft PR
+    # with the label kept, the same hand-off as any other stop.
+    log_status "INFO" "All sub-issues done. Running the pre-PR review panel..."
+    if ! run_review_panel "$RALPH_GH_WORKSPACE" "$RALPH_GH_MAIN_BRANCH" "$parent_number"; then
+        abort_group "$parent_number" "$branch_name" "$(review_blocker_reason "$parent_number")"
+        return 1
+    fi
 
     complete_group "$parent_number" "$branch_name"
 }
@@ -609,7 +584,7 @@ complete_group() {
     # The PR body carries the list now, and a relabelled parent must not
     # inherit it. Without worktree mode the state dir outlives the run, and a
     # base commit's cached failures go stale with it (a flaky red stays red).
-    [[ "$is_pr_open" == "true" ]] && rm -f "$(pre_existing_failures_file "$parent_number")"
+    [[ "$is_pr_open" == "true" ]] && rm -f "$(pre_existing_failures_file "$parent_number")" "$(review_findings_file "$parent_number")"
     rm -rf "$RALPH_GH_STATE_DIR/verify_baseline"
 
     # Remove label from issue
@@ -1379,7 +1354,9 @@ case "${1:-}" in
         echo "  CLAUDE_TIMEOUT_MINUTES     Max time per sub-issue (default: 15)"
         echo "  RALPH_GH_MODEL             Implementation model (default: ANTHROPIC_MODEL, then claude-opus-5-5)"
         echo "  RALPH_GH_VERIFIER_MODEL    Independent verifier model (default: claude-sonnet-5)"
-        echo "  RALPH_GH_REVIEW_MODEL      Pre-PR review model (default: claude-sonnet-5)"
+        echo "  RALPH_GH_REVIEWERS         Pre-PR reviewers, comma-separated (default: security,code,ui; empty disables)"
+        echo "  RALPH_GH_REVIEW_MODEL      Pre-PR reviewer model (default: claude-sonnet-5; security: claude-opus-5-5)"
+        echo "  RALPH_GH_MAX_REVIEW_RUNS   Pre-PR review rounds, with a fix round between two (default: 2)"
         echo "  RALPH_GH_VERIFY_CMD        Test/build command run by the shell after each turn (default: .ralph/verify.sh)"
         echo "  RALPH_GH_VERIFY_BASELINE   1/0 — pass verify failures already red on the base commit (default: 1)"
         echo "  RALPH_GH_VERIFIER_ENABLED  1/0 — run the independent verifier gate (default: 1)"

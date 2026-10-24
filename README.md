@@ -187,7 +187,11 @@ Optional. Applies across all repos:
 | `CB_NO_PROGRESS_THRESHOLD` | `3` | Circuit breaker opens after N stuck attempts |
 | `RALPH_GH_MODEL` | `$ANTHROPIC_MODEL`, then `claude-opus-5-5` | Implementation model |
 | `RALPH_GH_VERIFIER_MODEL` | `claude-sonnet-5` | Independent read-only verifier |
-| `RALPH_GH_REVIEW_MODEL` | `claude-sonnet-5` | Pre-PR review pass |
+| `RALPH_GH_REVIEWERS` | `security,code,ui` | Pre-PR reviewers (empty disables the review) |
+| `RALPH_GH_REVIEW_MODEL` | `claude-sonnet-5` | Pre-PR reviewer model |
+| `RALPH_GH_REVIEW_MODEL_<NAME>` | `claude-opus-5-5` for `SECURITY` | Per-reviewer model override |
+| `RALPH_GH_REVIEW_PATHS_<NAME>` | `*.tsx,*.jsx,*.vue,*.svelte,*.css,*.scss,*.html` for `UI` | Run that reviewer only when a changed file matches (empty = always) |
+| `RALPH_GH_MAX_REVIEW_RUNS` | `2` | Pre-PR review rounds, with a fix round between two |
 | `RALPH_GH_FALLBACK_MODEL` | `claude-sonnet-5` | Used when the primary model is overloaded |
 | `RALPH_GH_PERMISSION_MODE` | `auto` | Claude Code permission mode for unattended runs |
 | `RALPH_GH_DENY_RULES` | force-push, reset, clean, PR/issue mutation, … | Hard deny list auto mode cannot override |
@@ -270,6 +274,7 @@ Ralph is designed to be **conservative, not clever**.
 |---|---|
 | **Label-gated** | Only touches issues you explicitly label. No surprises. |
 | **Never auto-merges** | Always opens a PR for human review. You decide what ships. |
+| **Specialist pre-PR review** | Security, code and UI reviewers read the whole branch in parallel and only report. A separate fixer acts on blocker/major findings, the shell re-runs your tests, and an unresolved blocker turns the PR into a draft. |
 | **Three gates per sub-issue** | The model's structured report, then the shell running your tests/build, then a separate read-only Claude session grading the diff against each acceptance criterion. Any red re-invokes the implementer with the failure as context. The implementer never grades itself. |
 | **Hard deny list** | Runs in auto permission mode (classifier-approved tool calls, nothing blocks on a human) with a deny list for force-push, reset, clean, branch switching, and PR/issue mutation that auto mode cannot override. |
 | **Circuit breaker** | Stops after N stuck attempts. Opens a draft PR with partial work. |
@@ -290,6 +295,7 @@ ralph-gh.sh                          CLI + orchestration
   +-- lib/worktree_manager.sh        Worktree isolation for parallel workers
   +-- lib/claude_runner.sh           The one place `claude -p` is invoked (flags, deny list, schema, telemetry)
   +-- lib/verify_gate.sh             Shell test/build oracle + independent verifier session
+  +-- lib/review_panel.sh            Pre-PR specialist reviewers + fixer
   +-- lib/telemetry.sh               Append-only run records (~/.ralph-gh/telemetry.jsonl) + --stats
   +-- lib/utils.sh                   Logging + cross-platform timeout
   +-- lib/date_utils.sh              Date helpers (Linux + macOS)
@@ -334,6 +340,39 @@ proposal as a comment on the sub-issue and stops for a human; it never edits
 the issue. A report that proposes an amendment without stopping, or also claims
 the same criterion met, fails the acceptance gate. `--stats` counts proposals
 in the `amend` column.
+
+### The pre-PR review
+
+Once every sub-issue is green, the branch gets one more look before the PR
+opens. Each reviewer in `RALPH_GH_REVIEWERS` runs as its own read-only
+session against the full branch diff, all in parallel:
+
+```
+security (Opus) ─┐
+code   (Sonnet) ─┼─> blocker/major findings ─> fixer (implementation model)
+ui     (Sonnet) ─┘                               |  fixed or disputed, per finding
+                                                 v
+                                     verify.sh  ── red twice ─> revert the round
+                                                 |
+                       re-run only the reviewers whose findings were fixed
+```
+
+- **Reviewers never fix and the fixer never grades.** A finding the fixer
+  disputes (with path:line evidence) is not sent again; the re-run reviewer
+  sees the dispute and can only re-raise it with new evidence.
+- **The fix is verified.** The shell runs the verify gate on the fix round.
+  If it is still red after one retry, the round is reverted (not reset, so
+  the branch stays a fast-forward of anything already pushed).
+- **What is left goes in the PR body**: open findings, disputes with the
+  fixer's reason, minor notes, and any reviewer that did not report.
+  Reviewers fail open, like the verifier.
+- **An unresolved blocker opens a draft PR** with the `ralph` label kept.
+- The UI reviewer runs only when the diff touches UI files
+  (`RALPH_GH_REVIEW_PATHS_UI`).
+
+Reviewer focus prompts ship in `prompts/review-<name>.md`. Override one, or
+add a new reviewer, with `.ralph/reviewers/<name>.md` in the repo and its name
+in `RALPH_GH_REVIEWERS`.
 
 Retries are bounded by `RALPH_GH_MAX_LOOPS_PER_ISSUE` and the circuit breaker. Every Claude call and gate verdict is one line in the telemetry file; `ralph-gh --stats` summarises loops, turns, cost and gate failures per parent.
 

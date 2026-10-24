@@ -29,11 +29,17 @@ RALPH_GH_ALLOWED_TOOLS="Write,Read,Edit,Bash(git add *),Bash(git commit *),Bash(
 # Opus 5. The verifier, review and reconcile passes run on Sonnet 5.
 RALPH_GH_MODEL=""                         # empty = ANTHROPIC_MODEL, then claude-opus-5
 RALPH_GH_VERIFIER_MODEL="claude-sonnet-5" # independent read-only grader
-RALPH_GH_REVIEW_MODEL="claude-sonnet-5"   # pre-PR /review-best-practices pass
+RALPH_GH_REVIEW_MODEL="claude-sonnet-5"   # pre-PR reviewers (code, ui)
+RALPH_GH_REVIEW_MODEL_SECURITY="claude-opus-5-5"  # the security reviewer
 RALPH_RECONCILER_MODEL="claude-sonnet-5"  # parallel-merge reconciliation
 RALPH_GH_FALLBACK_MODEL="claude-sonnet-5" # --fallback-model when the primary is overloaded ("" disables)
 RALPH_GH_EFFORT=""                        # low|medium|high|xhigh|max; empty = CLAUDE_CODE_EFFORT_LEVEL
 RALPH_GH_MAX_BUDGET_USD=""                # --max-budget-usd per Claude call; empty = no cap
+
+# Pre-PR review: read-only specialist reviewers, then a fixer, then verify.
+RALPH_GH_REVIEWERS="security,code,ui"     # empty disables; add a reviewer with .ralph/reviewers/<name>.md
+RALPH_GH_MAX_REVIEW_RUNS=2                # review rounds; a fix round sits between two
+RALPH_GH_REVIEW_PATHS_UI="*.tsx,*.jsx,*.vue,*.svelte,*.css,*.scss,*.html"  # ui runs only when a changed file matches
 
 # Gates (run after EVERY Claude turn, in this order; any failure re-invokes
 # Claude with the failure as context):

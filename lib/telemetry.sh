@@ -129,13 +129,14 @@ telemetry_stats() {
             gate_fail_accept:   (map(select(.event == "gate" and .gate == "acceptance" and .outcome == "fail")) | length),
             gate_fail_verify:   (map(select(.event == "gate" and .gate == "verify" and .outcome == "fail")) | length),
             gate_fail_verifier: (map(select(.event == "gate" and .gate == "verifier" and .outcome == "fail")) | length),
+            gate_fail_review:   (map(select(.event == "gate" and (.gate | startswith("review")) and .outcome == "fail")) | length),
             amendments: (map(select(.event == "gate" and .gate == "amendment")) | length),
             denials: (map(select(.event == "claude") | .permission_denials // 0) | add // 0),
             outcome: (map(select(.event == "outcome") | .outcome) | last // "-")
           })
         | sort_by(.first)
-        | (["parent","subs","impl","calls","turns","min","cost$","accept✗","verify✗","verifier✗","amend","denied","outcome","last"] | @tsv),
-          (.[] | [ (.parent|tostring), .subs, .implement_calls, .calls, .turns, (.minutes|floor), (.cost|.*100|round/100), .gate_fail_accept, .gate_fail_verify, .gate_fail_verifier, .amendments, .denials, .outcome, .last[0:10] ] | @tsv)
+        | (["parent","subs","impl","calls","turns","min","cost$","accept✗","verify✗","verifier✗","review✗","amend","denied","outcome","last"] | @tsv),
+          (.[] | [ (.parent|tostring), .subs, .implement_calls, .calls, .turns, (.minutes|floor), (.cost|.*100|round/100), .gate_fail_accept, .gate_fail_verify, .gate_fail_verifier, .gate_fail_review, .amendments, .denials, .outcome, .last[0:10] ] | @tsv)
     ' "$RALPH_GH_TELEMETRY_FILE" | { column -t -s $'\t' 2>/dev/null || cat; }
     echo ""
     jq -rs --arg repo "$repo_filter" '
