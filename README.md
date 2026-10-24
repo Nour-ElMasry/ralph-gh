@@ -192,6 +192,8 @@ Optional. Applies across all repos:
 | `RALPH_GH_REVIEW_MODEL_<NAME>` | `claude-opus-5-5` for `SECURITY` | Per-reviewer model override |
 | `RALPH_GH_REVIEW_PATHS_<NAME>` | `*.tsx,*.jsx,*.vue,*.svelte,*.css,*.scss,*.html` for `UI` | Run that reviewer only when a changed file matches (empty = always) |
 | `RALPH_GH_MAX_REVIEW_RUNS` | `2` | Pre-PR review rounds, with a fix round between two |
+| `RALPH_GH_PRECHECK_CMD` | `.ralph/precheck.sh` if present | Slow suites (e2e, integration) the shell runs once before the pre-PR review |
+| `RALPH_GH_PRECHECK_TIMEOUT_MINUTES` | `30` | Precheck timeout |
 | `RALPH_GH_FALLBACK_MODEL` | `claude-sonnet-5` | Used when the primary model is overloaded |
 | `RALPH_GH_PERMISSION_MODE` | `auto` | Claude Code permission mode for unattended runs |
 | `RALPH_GH_DENY_RULES` | force-push, reset, clean, PR/issue mutation, … | Hard deny list auto mode cannot override |
@@ -369,6 +371,13 @@ ui     (Sonnet) ─┘                               |  fixed or disputed, per f
 - **An unresolved blocker opens a draft PR** with the `ralph` label kept.
 - The UI reviewer runs only when the diff touches UI files
   (`RALPH_GH_REVIEW_PATHS_UI`).
+
+**Precheck.** Suites too slow for the per-turn verify gate (e2e against a real
+database, integration) go in `.ralph/precheck.sh` (or `RALPH_GH_PRECHECK_CMD`).
+The shell runs it before the first review round. A red run is a major finding
+for the fixer, with the output tail; the precheck re-runs after the fix round
+unless the fixer disputed it. The script owns its setup (starting a test
+database, for example) and any locking between parallel ralph runs.
 
 Reviewer focus prompts ship in `prompts/review-<name>.md`. Override one, or
 add a new reviewer, with `.ralph/reviewers/<name>.md` in the repo and its name

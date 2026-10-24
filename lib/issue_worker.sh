@@ -453,41 +453,8 @@ _acceptance_amendments_failure() {
     return 0
 }
 
-# Run e2e tests and return failure tail on stderr if red. Returns 0 if green, 1 if red.
-# Uses the lead-formz test docker-compose layout; no-op if the compose file isn't present.
-run_e2e_pre_check() {
-    local workspace=$1
-    local compose_file="$workspace/apps/api/docker-compose.test.yml"
-
-    if [[ ! -f "$compose_file" ]]; then
-        log_status "INFO" "No e2e docker-compose file at $compose_file, skipping e2e pre-check"
-        return 0
-    fi
-
-    log_status "INFO" "Starting test database for e2e pre-check..."
-    if ! (cd "$workspace" && docker compose -f "$compose_file" up -d >/dev/null 2>&1); then
-        log_status "WARN" "Could not start test database; skipping e2e pre-check"
-        return 0
-    fi
-
-    local e2e_log="$RALPH_GH_STATE_DIR/logs/e2e_pre_check_$(date '+%Y%m%d_%H%M%S').log"
-    mkdir -p "$(dirname "$e2e_log")"
-    log_status "INFO" "Running pnpm --filter api test:e2e (timeout 10min)..."
-
-    if (cd "$workspace" && portable_timeout 600s pnpm --filter api test:e2e < /dev/null > "$e2e_log" 2>&1); then
-        log_status "SUCCESS" "E2E pre-check green"
-        return 0
-    fi
-
-    log_status "WARN" "E2E pre-check failed — the failures go to the review fixer"
-    # Emit last 200 lines on stderr so the caller can inject them into the prompt
-    tail -200 "$e2e_log" >&2
-    return 1
-}
-
 export -f build_full_prompt execute_for_sub_issue
 export -f get_saved_session_id clear_saved_session get_last_recommendation
 export -f format_last_amendments build_amendment_comment record_last_amendments _acceptance_amendments_failure
 export -f get_last_sub_title get_last_sub_body
 export -f run_acceptance_gate
-export -f run_e2e_pre_check

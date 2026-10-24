@@ -5,8 +5,8 @@
 # Reviewers only report; a separate fixer acts on blocker/major findings; the
 # shell verifies the fix and reverts a round that stays red; disputed findings
 # are not re-sent; what is left lands in the PR body, and an unresolved blocker
-# fails the panel. run_claude, the verify gate and the e2e pre-check are mocked;
-# git is real.
+# fails the panel. run_claude and the verify gate are mocked;
+# git and the precheck script are real.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$SCRIPT_DIR/lib/utils.sh"
@@ -106,7 +106,6 @@ run_verify_gate() {
     fi
     return 0
 }
-run_e2e_pre_check() { return 0; }
 
 clean='{"findings":[],"summary":"clean"}'
 finding() {  # severity title [location]
@@ -132,6 +131,17 @@ setup() {
     rm -f "$RALPH_GH_TELEMETRY_FILE"
 }
 calls() { cat "$MOCK/calls" 2>/dev/null; }
+# A repo precheck that is red on the runs listed in $MOCK/precheck_red.<n>.
+add_precheck() {
+    mkdir -p "$WS/.ralph"
+    cat > "$WS/.ralph/precheck.sh" <<SH
+n=\$(( \$(cat "$MOCK/count.precheck" 2>/dev/null || echo 0) + 1 ))
+echo "\$n" > "$MOCK/count.precheck"
+echo "running e2e"
+[[ -f "$MOCK/precheck_red.\$n" ]] && { echo "FAIL leads.e2e-spec.ts"; exit 1; }
+exit 0
+SH
+}
 # Strict mode, as ralph-gh.sh runs.
 panel() { (set -euo pipefail; cd "$WS" && run_review_panel "$WS" main 10); }
 
@@ -276,6 +286,67 @@ echo "$clean" > "$MOCK/code.1"
 panel; rc=$?
 assert_eq "a silent reviewer does not block (fail-open)" "0" "$rc"
 assert_contains "and is named in the PR body" "Reviewers that did not report" "$(review_findings_section 10)"
+
+echo ""
+echo "=== precheck ==="
+setup app.ts
+add_precheck
+echo "$clean" > "$MOCK/security.1"; echo "$clean" > "$MOCK/code.1"
+panel; rc=$?
+assert_eq "green precheck, clean review passes" "0" "$rc"
+assert_eq "precheck ran once" "1" "$(cat "$MOCK/count.precheck")"
+assert_not_contains "no fixer when the precheck is green" "review-fix" "$(calls)"
+
+setup app.ts
+add_precheck
+touch "$MOCK/precheck_red.1"
+echo "$clean" > "$MOCK/security.1"; echo "$clean" > "$MOCK/code.1"
+echo '{"status":"COMPLETE","findings":[{"id":"PRECHECK-1.1","outcome":"fixed","note":"fixed the spec"}],"recommendation":"ok"}' > "$MOCK/fixer.1"
+panel; rc=$?
+assert_eq "red precheck fixed → the panel passes" "0" "$rc"
+fix_prompt=$(cat "$MOCK/prompt.review-fix")
+assert_contains "red precheck reaches the fixer as a major" "**PRECHECK-1.1** [major] precheck" "$fix_prompt"
+assert_contains "with the output tail" "FAIL leads.e2e-spec.ts" "$fix_prompt"
+assert_eq "the precheck re-runs after the fix" "2" "$(cat "$MOCK/count.precheck")"
+assert_eq "clean reviewers are not re-run for a precheck fix" "1" "$(grep -c 'review:code' "$MOCK/calls")"
+assert_eq "nothing left for the PR body" "" "$(review_findings_section 10)"
+assert_eq "precheck gate events recorded" "1" "$(jq -s '[.[] | select(.event == "gate" and .gate == "review:precheck" and .outcome == "fail")] | length' "$RALPH_GH_TELEMETRY_FILE")"
+
+setup app.ts
+add_precheck
+touch "$MOCK/precheck_red.1" "$MOCK/precheck_red.2"
+echo "$clean" > "$MOCK/security.1"; echo "$clean" > "$MOCK/code.1"
+echo '{"status":"COMPLETE","findings":[{"id":"PRECHECK-1.1","outcome":"fixed","note":"x"}],"recommendation":"ok"}' > "$MOCK/fixer.1"
+panel; rc=$?
+assert_eq "a precheck still red is a major: the panel passes" "0" "$rc"
+assert_contains "and it is left open in the PR body" "[major] precheck" "$(review_findings_section 10)"
+
+setup app.ts
+add_precheck
+touch "$MOCK/precheck_red.1"
+echo "$clean" > "$MOCK/security.1"; echo "$clean" > "$MOCK/code.1"
+echo '{"status":"COMPLETE","findings":[{"id":"PRECHECK-1.1","outcome":"disputed","note":"flaky on main too"}],"recommendation":"ok"}' > "$MOCK/fixer.1"
+panel
+assert_eq "a disputed precheck is not re-run" "1" "$(cat "$MOCK/count.precheck")"
+assert_contains "the dispute is in the PR body" "flaky on main too" "$(review_findings_section 10)"
+
+RALPH_GH_REVIEWERS="ui"
+setup app.ts
+add_precheck
+touch "$MOCK/precheck_red.1"
+echo '{"status":"COMPLETE","findings":[{"id":"PRECHECK-1.1","outcome":"fixed","note":"x"}],"recommendation":"ok"}' > "$MOCK/fixer.1"
+panel; rc=$?
+assert_eq "a red precheck runs the fixer when no reviewer applies" "1" "$(grep -c 'review-fix' "$MOCK/calls")"
+assert_eq "and re-runs green" "0" "$rc"
+RALPH_GH_REVIEWERS="security,code,ui"
+
+setup app.ts
+echo "$clean" > "$MOCK/security.1"; echo "$clean" > "$MOCK/code.1"
+RALPH_GH_PRECHECK_CMD="echo boom; exit 3"
+echo '{"status":"COMPLETE","findings":[],"recommendation":"ok"}' > "$MOCK/fixer.1"
+panel
+assert_contains "RALPH_GH_PRECHECK_CMD is used without a repo script" "exit 3" "$(review_findings_section 10)"
+RALPH_GH_PRECHECK_CMD=""
 
 echo ""
 echo "=== telemetry ==="

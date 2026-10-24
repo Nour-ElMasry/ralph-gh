@@ -1357,6 +1357,7 @@ case "${1:-}" in
         echo "  RALPH_GH_REVIEWERS         Pre-PR reviewers, comma-separated (default: security,code,ui; empty disables)"
         echo "  RALPH_GH_REVIEW_MODEL      Pre-PR reviewer model (default: claude-sonnet-5; security: claude-opus-5-5)"
         echo "  RALPH_GH_MAX_REVIEW_RUNS   Pre-PR review rounds, with a fix round between two (default: 2)"
+        echo "  RALPH_GH_PRECHECK_CMD      Slow suites run once before the pre-PR review (default: .ralph/precheck.sh)"
         echo "  RALPH_GH_VERIFY_CMD        Test/build command run by the shell after each turn (default: .ralph/verify.sh)"
         echo "  RALPH_GH_VERIFY_BASELINE   1/0 — pass verify failures already red on the base commit (default: 1)"
         echo "  RALPH_GH_VERIFIER_ENABLED  1/0 — run the independent verifier gate (default: 1)"

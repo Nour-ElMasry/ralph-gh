@@ -40,6 +40,8 @@ RALPH_GH_MAX_BUDGET_USD=""                # --max-budget-usd per Claude call; em
 RALPH_GH_REVIEWERS="security,code,ui"     # empty disables; add a reviewer with .ralph/reviewers/<name>.md
 RALPH_GH_MAX_REVIEW_RUNS=2                # review rounds; a fix round sits between two
 RALPH_GH_REVIEW_PATHS_UI="*.tsx,*.jsx,*.vue,*.svelte,*.css,*.scss,*.html"  # ui runs only when a changed file matches
+RALPH_GH_PRECHECK_CMD=""                  # empty = <repo>/.ralph/precheck.sh if present; slow suites run once before the review
+RALPH_GH_PRECHECK_TIMEOUT_MINUTES=30
 
 # Gates (run after EVERY Claude turn, in this order; any failure re-invokes
 # Claude with the failure as context):

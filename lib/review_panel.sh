@@ -21,6 +21,12 @@
 #   RALPH_GH_REVIEW_MODEL_<NAME>   model (default RALPH_GH_REVIEW_MODEL)
 #   RALPH_GH_REVIEW_PATHS_<NAME>   comma-separated globs; the reviewer runs only
 #                                  when a changed file matches (empty = always)
+#
+# Precheck: before the first round the shell runs the repo's slow suites
+# (RALPH_GH_PRECHECK_CMD, else <repo>/.ralph/precheck.sh) — the ones too slow
+# for the per-turn verify gate, such as e2e against a real database. A red run
+# is a major finding for the fixer, and the precheck re-runs after a fix round
+# unless the fixer disputed it.
 
 RALPH_GH_REVIEWERS="${RALPH_GH_REVIEWERS-security,code,ui}"      # empty disables the pre-PR review
 RALPH_GH_MAX_REVIEW_RUNS="${RALPH_GH_MAX_REVIEW_RUNS:-2}"         # review rounds (a fix round sits between two)
@@ -30,6 +36,8 @@ RALPH_GH_REVIEW_PATHS_UI="${RALPH_GH_REVIEW_PATHS_UI-*.tsx,*.jsx,*.vue,*.svelte,
 RALPH_GH_REVIEW_TIMEOUT_MINUTES="${RALPH_GH_REVIEW_TIMEOUT_MINUTES:-15}"
 RALPH_GH_REVIEW_ALLOWED_TOOLS="${RALPH_GH_REVIEW_ALLOWED_TOOLS:-${RALPH_GH_VERIFIER_ALLOWED_TOOLS:-Read,Grep,Glob,Bash(git diff *),Bash(git log *),Bash(git show *),Bash(git status),Bash(git ls-files *),Bash(cat *),Bash(ls *)}}"
 RALPH_GH_REVIEW_PROMPT_DIR="${RALPH_GH_REVIEW_PROMPT_DIR:-${SCRIPT_DIR:-.}/prompts}"
+RALPH_GH_PRECHECK_CMD="${RALPH_GH_PRECHECK_CMD:-}"               # empty = <repo>/.ralph/precheck.sh if present
+RALPH_GH_PRECHECK_TIMEOUT_MINUTES="${RALPH_GH_PRECHECK_TIMEOUT_MINUTES:-30}"
 
 REVIEWER_SCHEMA='{"type":"object","properties":{"findings":{"type":"array","items":{"type":"object","properties":{"severity":{"type":"string","enum":["blocker","major","minor"]},"location":{"type":"string"},"title":{"type":"string"},"detail":{"type":"string"},"suggestion":{"type":"string"}},"required":["severity","location","title","detail"]}},"summary":{"type":"string"}},"required":["findings","summary"]}'
 
@@ -377,6 +385,56 @@ review_findings_file() {
     printf '%s' "${RALPH_GH_STATE_DIR:-.ralph-gh}/review_findings_${1}.json"
 }
 
+# Echo the precheck command for a workspace, or nothing when none is configured.
+resolve_precheck_cmd() {
+    local workspace=$1
+    if [[ -n "$RALPH_GH_PRECHECK_CMD" ]]; then
+        printf '%s' "$RALPH_GH_PRECHECK_CMD"
+    elif [[ -f "$workspace/.ralph/precheck.sh" ]]; then
+        printf 'bash %s' "$workspace/.ralph/precheck.sh"
+    fi
+    return 0
+}
+
+# Run the precheck and echo its findings as a JSON array: empty when green or
+# not configured, one major finding with the output tail when red.
+#   $1 = workspace, $2 = review round (for the finding id)
+run_precheck() {
+    local workspace=$1
+    local round=$2
+
+    local cmd
+    cmd=$(resolve_precheck_cmd "$workspace")
+    if [[ -z "$cmd" ]]; then
+        printf '[]'
+        return 0
+    fi
+
+    local log_file
+    log_file="${RALPH_GH_STATE_DIR:-$workspace/.ralph-gh}/logs/precheck_$(date '+%Y%m%d_%H%M%S').log"
+    mkdir -p "$(dirname "$log_file")"
+    log_status "INFO" "Precheck: running \`$cmd\` (timeout ${RALPH_GH_PRECHECK_TIMEOUT_MINUTES}m)"
+
+    local rc=0
+    (cd "$workspace" && portable_timeout "$((RALPH_GH_PRECHECK_TIMEOUT_MINUTES * 60))s" bash -c "$cmd" \
+        < /dev/null > "$log_file" 2>&1) || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        log_status "SUCCESS" "Precheck green"
+        telemetry_record_gate "review:precheck" "pass" "" 2>/dev/null || true
+        printf '[]'
+        return 0
+    fi
+
+    local what="failed (exit $rc)"
+    [[ $rc -eq 124 ]] && what="timed out after ${RALPH_GH_PRECHECK_TIMEOUT_MINUTES}m"
+    log_status "WARN" "Precheck $what — the failures go to the review fixer (log: $log_file)"
+    telemetry_record_gate "review:precheck" "fail" "$what" 2>/dev/null || true
+    jq -nc --arg id "PRECHECK-$round.1" --arg cmd "$cmd" --arg what "$what" --arg tail "$(tail -200 "$log_file")" \
+        '[{id: $id, reviewer: "precheck", severity: "major", location: $cmd,
+           title: "Precheck \($what) on this branch",
+           detail: ("Diagnose and fix. The shell re-runs `\($cmd)` after your fixes.\n\n" + $tail)}]'
+}
+
 # Run the whole pre-PR review for a parent.
 #   $1 = workspace, $2 = main branch, $3 = parent number
 # Writes review_findings_file: {unresolved, disputed, minor, missing}.
@@ -413,12 +471,9 @@ run_review_panel() {
     # keeps only its minors — its actionable findings were fixed or disputed.
     local latest='{}' disputed='[]' missing='[]'
 
-    local e2e_failures=""
-    if ! e2e_failures=$(run_e2e_pre_check "$workspace" 2>&1 >/dev/null); then
-        latest=$(jq -nc --arg d "$e2e_failures" '{e2e: [{id: "E2E-1.1", reviewer: "e2e", severity: "major",
-            location: "pnpm --filter api test:e2e", title: "E2E suite is red on this branch",
-            detail: ("Diagnose and fix. Run `pnpm --filter api test:e2e` after your fixes.\n\n" + $d)}]}')
-    fi
+    local precheck
+    precheck=$(run_precheck "$workspace" 1)
+    [[ "$precheck" != "[]" ]] && latest=$(jq -c --argjson p "$precheck" '.precheck = $p' <<< "$latest")
 
     if [[ -z "$reviewers" && "$latest" == "{}" ]]; then
         log_status "INFO" "Pre-PR review: no reviewer applies to this change set"
@@ -475,12 +530,18 @@ run_review_panel() {
         to_run=$(jq -r --argjson rep "$fix_report" '
             ($rep | map(select(.outcome == "disputed") | .id)) as $disp
             | [.[] | select((.id | IN($disp[])) | not) | .reviewer] | unique | .[]' <<< "$actionable")
+        local rerun_precheck=false
+        grep -qFx precheck <<< "$to_run" && rerun_precheck=true
         # Reviewers that did not report get another chance alongside the
-        # re-runs; e2e is not a reviewer and never re-runs.
+        # re-runs; the precheck is re-run by the shell, not as a reviewer.
         to_run=$({ printf '%s\n' "$to_run"; jq -r '.[]' <<< "$missing"; } \
             | grep -Fx -f <(printf '%s\n' "$reviewers" | sed '/^$/d') | sort -u || true)
         latest=$(jq -c --argjson rerun "$(printf '%s\n' "$to_run" | jq -Rsc 'split("\n") | map(select(length > 0))')" '
             with_entries(if (.key | IN($rerun[])) then . else .value |= map(select(.severity == "minor")) end)' <<< "$latest")
+        if [[ "$rerun_precheck" == "true" ]]; then
+            precheck=$(run_precheck "$workspace" $((round + 1)))
+            latest=$(jq -c --argjson p "$precheck" '.precheck = $p' <<< "$latest")
+        fi
     done
 
     local unresolved
@@ -524,4 +585,5 @@ review_findings_section() {
 
 export -f _review_var_suffix review_model_for review_prompt_file reviewer_applies select_reviewers
 export -f build_reviewer_prompt build_fixer_prompt run_reviewers _review_commit_fixes run_fix_round
+export -f resolve_precheck_cmd run_precheck
 export -f review_findings_file run_review_panel review_blocker_reason review_findings_section
